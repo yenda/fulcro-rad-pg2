@@ -1,0 +1,348 @@
+= Type Reference
+:toc:
+:toclevels: 3
+
+This document provides a comprehensive reference for the types and options supported by fulcro-rad-sql.
+
+== Supported RAD Types
+
+The following RAD attribute types are supported and mapped to PostgreSQL types:
+
+[cols="1,2,1,1"]
+|===
+|RAD Type |PostgreSQL Type |Default Length |Customizable?
+
+|`:string`
+|`VARCHAR(2048)`
+|2048
+|Yes, via `max-length`
+
+|`:password`
+|`VARCHAR(512)`
+|512
+|Yes, via `max-length`
+
+|`:boolean`
+|`BOOLEAN`
+|—
+|No
+
+|`:int`
+|`INTEGER`
+|—
+|No (32-bit signed)
+
+|`:long`
+|`BIGINT`
+|—
+|No (64-bit signed)
+
+|`:decimal`
+|`decimal(20,2)`
+|—
+|No (hardcoded precision)
+
+|`:instant`
+|`TIMESTAMP WITH TIME ZONE`
+|—
+|No
+
+|`:enum`
+|`VARCHAR(200)`
+|200
+|Yes, via `max-length`
+
+|`:keyword`
+|`VARCHAR(200)`
+|200
+|Yes, via `max-length`
+
+|`:symbol`
+|`VARCHAR(200)`
+|200
+|Yes, via `max-length`
+
+|`:uuid`
+|`UUID`
+|—
+|No (native PostgreSQL type)
+
+|`:ref`
+|(FK to target's ID type)
+|—
+|—
+|===
+
+=== Type Details
+
+==== String Types
+
+`:string`, `:password`, `:keyword`, `:symbol`, and `:enum` are all stored as `VARCHAR`. The default lengths vary by type but can be customized using the `::sql/max-length` option.
+
+[source,clojure]
+----
+(defattr user-name :user/name :string
+  {::attr/schema :production
+   ::attr/identities #{:user/id}
+   ::sql/max-length 100})  ; VARCHAR(100) instead of default VARCHAR(2048)
+----
+
+==== Numeric Types
+
+* `:int` — 32-bit signed integer (`INTEGER`), range: -2,147,483,648 to 2,147,483,647
+* `:long` — 64-bit signed integer (`BIGINT`), range: -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807
+* `:decimal` — Fixed-precision decimal (`decimal(20,2)`), suitable for monetary values
+
+==== Temporal Types
+
+`:instant` maps to `TIMESTAMP WITH TIME ZONE` and uses `java.time.Instant` on the JVM side. This is the only temporal type supported.
+
+==== Enumerations
+
+Enumerations are stored as strings rather than native PostgreSQL `ENUM` types. This avoids the complexity of schema migrations when adding/removing enum values.
+
+[source,clojure]
+----
+(defattr order-status :order/status :enum
+  {::attr/enumerated-values #{:status/pending :status/shipped :status/delivered}
+   ::attr/schema :production
+   ::attr/identities #{:order/id}})
+----
+
+== SQL Options
+
+These options are defined in the `com.fulcrologic.rad.database-adapters.sql` namespace.
+
+[cols="2,3,2"]
+|===
+|Option |Purpose |Used On
+
+|`::sql/table`
+|Specifies the database table name for an entity
+|Identity attributes only
+
+|`::sql/column-name`
+|Overrides the default column name (which is derived from the attribute name using snake_case)
+|Any attribute
+
+|`::sql/max-length`
+|Sets the VARCHAR length for string-based types
+|`:string`, `:password`, `:keyword`, `:symbol`, `:enum`
+
+|`::sql/owns-ref?`
+|Indicates the FK column is stored on this entity's table (for one-to-one relationships)
+|To-one `:ref` attributes
+
+|`::sql/ref`
+|Specifies the reverse FK attribute (FK is on the target table)
+|To-many `:ref` attributes
+
+|`::sql/delete-referent?`
+|When a reference changes, delete the orphaned entity (simulates Datomic's `isComponent`)
+|`:ref` attributes
+
+|`::sql/order-by`
+|Default ordering for to-many relationships
+|To-many `:ref` attributes
+
+|`::sql/model->sql-value`
+|Custom transformer function `(fn [clj-value] sql-value)` for writing
+|Any attribute
+
+|`::sql/sql->model-value`
+|Custom transformer function `(fn [sql-value] clj-value)` for reading
+|Any attribute
+|===
+
+=== Option Examples
+
+==== Table and Column Names
+
+[source,clojure]
+----
+(defattr user-id :user/id :uuid
+  {::attr/identity? true
+   ::attr/schema :production
+   ::sql/table "app_users"})  ; Custom table name
+
+(defattr user-created :user/created-at :instant
+  {::attr/schema :production
+   ::attr/identities #{:user/id}
+   ::sql/column-name "created_timestamp"})  ; Custom column name
+----
+
+==== References
+
+[source,clojure]
+----
+;; To-one: FK stored on this table
+(defattr order-customer :order/customer :ref
+  {::attr/cardinality :one
+   ::attr/target :customer/id
+   ::attr/schema :production
+   ::attr/identities #{:order/id}})
+
+;; To-many: FK is on the target table (line-items have order_id column)
+(defattr order-line-items :order/line-items :ref
+  {::attr/cardinality :many
+   ::attr/target :line-item/id
+   ::attr/schema :production
+   ::attr/identities #{:order/id}
+   ::sql/ref :line-item/order})  ; Points to reverse ref attribute
+
+;; Owned component (deleted when parent reference changes)
+(defattr document-metadata :document/metadata :ref
+  {::attr/cardinality :one
+   ::attr/target :metadata/id
+   ::attr/schema :production
+   ::attr/identities #{:document/id}
+   ::sql/owns-ref? true
+   ::sql/delete-referent? true})
+----
+
+==== Value Transformers
+
+[source,clojure]
+----
+(defattr user-preferences :user/preferences :string
+  {::attr/schema :production
+   ::attr/identities #{:user/id}
+   ::sql/model->sql-value pr-str           ; Clojure map -> EDN string
+   ::sql/sql->model-value edn/read-string}) ; EDN string -> Clojure map
+----
+
+== Test Coverage
+
+The test suite includes comprehensive coverage of all types and options through the following test entities:
+
+[cols="1,2,2"]
+|===
+|Entity |Types Demonstrated |Options Demonstrated
+
+|Account
+|`:uuid`, `:string`, `:boolean`, `:ref`
+|`table`, `max-length`, `column-name`
+
+|Address
+|`:uuid`, `:string`, `:enum`, `:ref`
+|`table`
+
+|User
+|`:uuid`, `:string`
+|`table`
+
+|Product
+|`:uuid`, `:string`, `:int`, `:long`, `:decimal`, `:keyword`, `:symbol`, `:password`
+|`table`, `max-length`
+
+|Event
+|`:uuid`, `:string`, `:instant`
+|`table`
+
+|Category
+|`:uuid`, `:string`, `:int`, `:ref` (self-referential)
+|`table`, `ref`, `order-by`
+
+|Document
+|`:uuid`, `:string`, `:ref`
+|`table`, `owns-ref?`, `delete-referent?`
+
+|Metadata
+|`:uuid`, `:string`, `:int`, `:ref`
+|`table`, `ref`
+|===
+
+== Generative Test Generators
+
+The test suite includes property-based testing with generators for all supported types:
+
+[cols="1,3"]
+|===
+|Generator |Description
+
+|`gen-tempid`
+|Fulcro temporary IDs for new entities
+
+|`gen-uuid`
+|Random UUIDs
+
+|`gen-string-value`
+|Mix of normal strings and "nasty" strings (SQL injection attempts, Unicode, emoji, boundary lengths)
+
+|`gen-int-value`
+|Full 32-bit signed integer range
+
+|`gen-long-value`
+|Full 64-bit signed integer range
+
+|`gen-decimal-value`
+|BigDecimal with 2 decimal places
+
+|`gen-instant-value`
+|`java.time.Instant` values (2000-2030 range)
+
+|`gen-boolean-value`
+|`true` / `false`
+
+|`gen-enum-value`
+|Values from an enumerated set
+
+|`gen-keyword-value`
+|Namespaced and simple keywords
+
+|`gen-symbol-value`
+|Namespaced and simple symbols
+
+|`gen-password-value`
+|Strings up to 512 chars with special characters
+
+|`gen-chaos-string`
+|Invalid data: null bytes, oversized strings
+|===
+
+== Unsupported PostgreSQL Types
+
+The following PostgreSQL types are NOT currently supported by fulcro-rad-sql:
+
+[cols="1,2,2"]
+|===
+|Category |Types |Typical Use Case
+
+|Text
+|`TEXT`
+|Unlimited text (blog posts, descriptions)
+
+|Temporal
+|`DATE`, `TIME`, `INTERVAL`
+|Date-only, time-only, durations
+
+|Numeric
+|`FLOAT`, `DOUBLE PRECISION`, `NUMERIC(p,s)`
+|Floating point, custom precision decimals
+
+|JSON
+|`JSONB`, `JSON`
+|Schemaless/flexible data, document storage
+
+|Binary
+|`BYTEA`
+|Files, images, binary blobs
+
+|Network
+|`INET`, `CIDR`, `MACADDR`
+|IP addresses, network ranges
+
+|Arrays
+|`integer[]`, `text[]`, etc.
+|Multi-value fields without join tables
+
+|Geometric
+|`POINT`, `LINE`, `POLYGON`, `BOX`
+|Spatial/geographic data
+|===
+
+To use unsupported types, you can:
+
+1. Use `::sql/model->sql-value` and `::sql/sql->model-value` transformers to convert between a supported type and your desired representation
+2. Store complex data as JSON strings in a `:string` field with custom transformers
+3. Use raw SQL for operations that require native PostgreSQL types
