@@ -8,30 +8,27 @@
    [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
    [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
    [com.wsscode.pathom3.connect.operation :as pco]
-   [hyperfiddle.rcf :refer [tests]]
    [honey.sql :as sql]
    [taoensso.encore :as enc]
    [taoensso.timbre :as log]))
 
 (defn reorder-maps-by-id
-  "TODO benchmark this against reduce"
+  "Reorder target-vec to match the order of order-vec based on id-key.
+   Maps in order-vec without a corresponding entry in target-vec are preserved as-is."
   [id-key order-vec target-vec]
   (let [id-map (into {} (map (juxt id-key identity)) target-vec)]
     (mapv #(get id-map (id-key %) %) order-vec)))
 
-(tests
- (def order-vec [{:l/id 3} {:l/id 10} {:l/id "w"} {:l/id 1}])
- (def target-vec [{:l/id 1 :value "a"} {:l/id "w" :value "b"} {:l/id 3 :value "c"}])
- (reorder-maps-by-id :l/id order-vec target-vec) := [{:l/id 3 :value "c"} {:l/id 10} {:l/id "w" :value "b"} {:l/id 1 :value "a"}])
-
 (defn get-column [attribute]
-  (or (::rad.sql/column-name attribute)
-      (:column attribute)
-      (some-> (::attr/qualified-key attribute) name keyword)
-      (throw (ex-info "Can't find column name for attribute" {:attribute attribute}))))
+  (let [col (or (::rad.sql/column-name attribute)
+                (:column attribute)
+                (some-> (::attr/qualified-key attribute) name))]
+    (if col
+      (keyword col)
+      (throw (ex-info "Can't find column name for attribute" {:attribute attribute})))))
 
 (defn get-table [attribute]
-  (::rad.sql/table attribute))
+  (some-> (::rad.sql/table attribute) keyword))
 
 (defn to-one-keyword [qualified-key]
   (keyword (str (namespace qualified-key)
@@ -69,7 +66,7 @@
              column->outputs))
 
 (defn id-resolver [{::attr/keys [id-attr id-attr->attributes attributes k->attr] :as c}]
-  (let [id-attr-k  (::attr/qualified-key id-attr)
+  (let [id-attr-k (::attr/qualified-key id-attr)
         column->outputs (get-column->outputs id-attr-k id-attr->attributes k->attr false)
         column-mapping (get-column-mapping column->outputs)
         outputs (vec (flatten (vals column->outputs)))
@@ -88,7 +85,7 @@
            op-name
            (cond->
             {::pco/output outputs
-             ::pco/batch?  true
+             ::pco/batch? true
              ::pco/resolve
              (fn [env input]
                (sql.query/timer
@@ -101,23 +98,23 @@
                                                  query
                                                  schema
                                                  input)
-                      results-by-id       (reduce
-                                           (fn [acc row]
-                                             (let [result
-                                                   (reduce
-                                                    (fn [acc [output-path column]]
-                                                      (let [value (get row column)]
+                      results-by-id (reduce
+                                     (fn [acc row]
+                                       (let [result
+                                             (reduce
+                                              (fn [acc [output-path column]]
+                                                (let [value (get row column)]
                                                   ;; if ref we don't return it
-                                                        (if (and (nil? value) (= (count output-path) 2))
-                                                          acc
-                                                          (assoc-in acc output-path value))))
-                                                    {}
-                                                    column-mapping)]
-                                               (assoc acc
-                                                      (id-attr-k result)
-                                                      result)))
-                                           {}
-                                           rows)
+                                                  (if (and (nil? value) (= (count output-path) 2))
+                                                    acc
+                                                    (assoc-in acc output-path value))))
+                                              {}
+                                              column-mapping)]
+                                         (assoc acc
+                                                (id-attr-k result)
+                                                result)))
+                                     {}
+                                     rows)
 
                       results (mapv (fn [id]
                                       (get results-by-id id)) ids)]
@@ -164,8 +161,8 @@
           entity-by-attribute-resolver
           (pco/resolver
            op-name
-           (cond-> {::pco/output  [{attr-k [target-k]}]
-                    ::pco/batch?  true
+           (cond-> {::pco/output [{attr-k [target-k]}]
+                    ::pco/batch? true
                     ::pco/resolve
                     (fn [env input]
                       (sql.query/timer
@@ -227,7 +224,7 @@
            op-name
            (cond->
             {::pco/output (conj outputs {attr-k outputs})
-             ::pco/batch?  true
+             ::pco/batch? true
              ::pco/resolve
              (fn [env input]
 
@@ -267,7 +264,7 @@
   SQL databases."
   [attributes schema]
   (log/info "Generating resolvers for SQL schema" schema)
-  (let [k->attr             (enc/keys-by ::attr/qualified-key attributes)
+  (let [k->attr (enc/keys-by ::attr/qualified-key attributes)
         id-attr->attributes (->> attributes
                                  (filter #(= schema (::attr/schema %)))
                                  (mapcat
@@ -286,8 +283,8 @@
          (fn [resolvers id-attr attributes]
            (conj resolvers (id-resolver {::attr/id-attr id-attr
                                          ::attr/id-attr->attributes id-attr->attributes
-                                         ::attr/attributes   attributes
-                                         ::attr/k->attr      k->attr})))
+                                         ::attr/attributes attributes
+                                         ::attr/k->attr k->attr})))
          []
          id-attr->attributes)
 
