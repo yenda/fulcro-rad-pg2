@@ -89,7 +89,7 @@
   (when (tempid/tempid? (log/spy :trace id))
     (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (if (= schema schema-to-save)
-        (let [table-name    (sql.schema/table-name key->attribute id-attr)
+        (let [table-kw      (keyword (sql.schema/table-name key->attribute id-attr))
               real-id       (get tempids id id)
               scalar-attrs  (keep
                              (fn [k]
@@ -104,10 +104,10 @@
                                (let [v (new-val attr)]
                                  (if (nil? v)
                                    acc
-                                   (assoc acc (sql.schema/column-name attr) v))))
-                             {(sql.schema/column-name id-attr) real-id}
+                                   (assoc acc (keyword (sql.schema/column-name attr)) v))))
+                             {(keyword (sql.schema/column-name id-attr)) real-id}
                              scalar-attrs)]
-          (sql/format {:insert-into table-name
+          (sql/format {:insert-into table-kw
                        :values [values]
                        :returning [:*]}))
         (log/debug "Schemas do not match. Not updating" ident)))))
@@ -127,10 +127,11 @@
   (when-not (tempid/tempid? id)
     (let [{::attr/keys [type schema] :as id-attr} (key->attribute table)]
       (when (= schema-to-save schema)
-        (let [table-name   (sql.schema/table-name key->attribute id-attr)]
+        (let [table-kw   (keyword (sql.schema/table-name key->attribute id-attr))
+              id-col-kw  (keyword (sql.schema/column-name id-attr))]
           (if (:delete diff)
-            (sql/format {:delete-from table-name
-                         :where [:= (sql.schema/column-name id-attr) id]})
+            (sql/format {:delete-from table-kw
+                         :where [:= id-col-kw id]})
             (let [scalar-attrs (keep
                                 (fn [k] (table-local-attr key->attribute schema-to-save k))
                                 (keys diff))
@@ -161,12 +162,12 @@
                           {}
                           scalar-attrs)]
               (if (= :delete values)
-                (sql/format {:delete-from table-name
-                             :where [:= (sql.schema/column-name id-attr) id]})
+                (sql/format {:delete-from table-kw
+                             :where [:= id-col-kw id]})
                 (when (seq values)
-                  (sql/format {:update table-name
+                  (sql/format {:update table-kw
                                :set values
-                               :where [:= (sql.schema/column-name id-attr) id]}))))))))))
+                               :where [:= id-col-kw id]}))))))))))
 
 (defn delta->scalar-updates [env tempids schema delta]
   (vec (keep (fn [[ident diff]] (scalar-update env tempids schema ident diff)) delta)))
@@ -232,49 +233,75 @@
   [^PSQLException e]
   (case (.getSQLState e)
     "08003" ::connection-does-not-exist
+    "22001" ::string-data-too-long
+    "22021" ::invalid-encoding
+    "22P02" ::invalid-text-representation
+    "23502" ::not-null-violation
     "23505" ::unique-violation
     "23514" ::check-violation
-    "57014" ::timeout
-    "23502" ::not-null-violation
     "40001" ::serialization-failure
+    "57014" ::timeout
     ::unknown))
+
+(defn- wrap-save-error
+  "Wrap a PSQLException in an ex-info with structured error data.
+   Preserves the original exception as the cause."
+  [^PSQLException e]
+  (let [condition (error-condition e)]
+    (ex-info (str "save-form! failed: " (name condition))
+             {:type ::save-error
+              :cause condition
+              :sql-state (.getSQLState e)
+              :message (.getMessage e)}
+             e)))
 
 (defn save-form!
   "Does all the necessary operations to persist mutations from the
-  form delta into the appropriate tables in the appropriate databases"
+  form delta into the appropriate tables in the appropriate databases.
+
+   Throws ex-info with :type ::save-error for database constraint violations.
+   The ex-data includes:
+     :type      - ::save-error
+     :cause     - keyword like ::string-data-too-long, ::invalid-encoding, etc.
+     :sql-state - PostgreSQL error code
+     :message   - Original error message
+   The original PSQLException is preserved as the cause."
   [{::attr/keys    [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter]
     :as            env} {::rad.form/keys [delta] :as d}]
-  (let [delta-before (with-out-str (pprint delta))
-        schemas (schemas-for-delta env delta)
-        delta (process-attributes key->attribute delta)
-        result  (atom {:tempids {}})]
-    (log/debug "Saving form across " schemas
-               {:delta delta-before
-                :processed-delta (with-out-str (pprint delta))})
-    ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
-    (doseq [schema (keys connection-pools)]
-      (let [adapter        (get adapters schema default-adapter)
-            ds             (get connection-pools schema)
-            {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
-            update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
-            steps          (concat update-scalars insert-scalars)]
-        (dh/with-retry
-          {:retry-if (fn [_return-value exception-thrown]
-                       (if (and exception-thrown
-                                (instance? PSQLException exception-thrown)
-                                (= ::serialization-failure (error-condition exception-thrown)))
-                         true
-                         false))
-           :max-retries 4
-           :backoff-ms [100 200 2.0]}
-          (jdbc/with-transaction [tx ds {:isolation :serializable}]
-         ;; allow relaxed FK constraints until end of txn
-            (when adapter
-              (vendor/relax-constraints! adapter tx))
-            (doseq [stmt-with-params steps]
-              (log/debug "save-form!"
-                         {:stmt-with-params stmt-with-params})
-              (jdbc/execute! tx stmt-with-params))))
-        (swap! result update :tempids merge tempids)))
-    @result))
+  (try
+    (let [delta-before (with-out-str (pprint delta))
+          schemas (schemas-for-delta env delta)
+          delta (process-attributes key->attribute delta)
+          result  (atom {:tempids {}})]
+      (log/debug "Saving form across " schemas
+                 {:delta delta-before
+                  :processed-delta (with-out-str (pprint delta))})
+      ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
+      (doseq [schema (keys connection-pools)]
+        (let [adapter        (get adapters schema default-adapter)
+              ds             (get connection-pools schema)
+              {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
+              update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
+              steps          (concat update-scalars insert-scalars)]
+          (dh/with-retry
+            {:retry-if (fn [_return-value exception-thrown]
+                         (if (and exception-thrown
+                                  (instance? PSQLException exception-thrown)
+                                  (= ::serialization-failure (error-condition exception-thrown)))
+                           true
+                           false))
+             :max-retries 4
+             :backoff-ms [100 200 2.0]}
+            (jdbc/with-transaction [tx ds {:isolation :serializable}]
+              ;; allow relaxed FK constraints until end of txn
+              (when adapter
+                (vendor/relax-constraints! adapter tx))
+              (doseq [stmt-with-params steps]
+                (log/debug "save-form!"
+                           {:stmt-with-params stmt-with-params})
+                (jdbc/execute! tx stmt-with-params))))
+          (swap! result update :tempids merge tempids)))
+      @result)
+    (catch PSQLException e
+      (throw (wrap-save-error e)))))
