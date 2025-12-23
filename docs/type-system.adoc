@@ -1,0 +1,526 @@
+= RAD Type System Deep Dive
+:toc:
+:toclevels: 3
+
+This document provides an in-depth exploration of how types work in Fulcro RAD and the SQL adapter, covering type definitions, the read/write pipeline, extensibility, and validation.
+
+== RAD Type Definitions
+
+=== Open Type System
+
+RAD types are intentionally **open** - they are simple keywords with no closed enumeration:
+
+[source,clojure]
+----
+;; From fulcro-rad/src/main/com/fulcrologic/rad/attributes.cljc
+(>def ::type keyword?)  ; Any keyword is valid as a type
+----
+
+This design allows database adapters to define additional types beyond the core set.
+
+=== Canonical Types
+
+The following types are documented in the RAD Developer's Guide:
+
+[cols="1,3"]
+|===
+|Type |Description
+
+|`:string`
+|Variable-length string
+
+|`:password`
+|Variant of string for sensitive data
+
+|`:boolean`
+|true/false
+
+|`:int`
+|32-bit integer
+
+|`:long`
+|64-bit integer
+
+|`:decimal`
+|Arbitrary-precision decimal number
+
+|`:instant`
+|Binary UTC timestamp (java.time.Instant)
+
+|`:keyword`
+|EDN keyword
+
+|`:symbol`
+|EDN symbol
+
+|`:enum`
+|Enumerated list of values
+
+|`:ref`
+|Reference to another entity
+
+|`:uuid`
+|UUID
+|===
+
+=== Attribute Definition
+
+Attributes are defined with `defattr`, which creates an attribute record:
+
+[source,clojure]
+----
+(defattr user-name :user/name :string
+  {::attr/schema :production
+   ::attr/identities #{:user/id}
+   ::sql/max-length 100})
+----
+
+The type is stored in `::attr/type` and is validated as a keyword at definition time via guardrails specs.
+
+== Type Pipeline
+
+=== Write Path
+
+When saving data, values flow through this pipeline:
+
+[source]
+----
+Fulcro Delta
+    │
+    ▼
+form->sql-value (resolvers.clj)
+    ├─ :ref → extract ID from ident [table id] → id
+    ├─ :enum → convert to string via (str value)
+    ├─ custom ::sql/model->sql-value → apply transformer
+    └─ else → pass through unchanged
+    │
+    ▼
+HoneySQL map
+    │
+    ▼
+SQL string + parameters
+    │
+    ▼
+next.jdbc/execute!
+    │
+    ▼
+JDBC driver (Java → SQL type conversion)
+    │
+    ▼
+PostgreSQL
+----
+
+==== form->sql-value Function
+
+[source,clojure]
+----
+;; From resolvers.clj
+(defn form->sql-value [{::attr/keys [type cardinality]
+                        ::rad.sql/keys [form->sql-value]} form-value]
+  (cond
+    ;; References: extract ID from ident
+    (and (= :ref type) (not= :many cardinality) (eql/ident? form-value))
+    (second form-value)
+
+    ;; Custom transformer defined
+    form->sql-value
+    (form->sql-value form-value)
+
+    ;; Enums: convert to string
+    (= type :enum)
+    (str form-value)
+
+    ;; Everything else: pass through
+    :else
+    form-value))
+----
+
+=== Read Path
+
+When reading data, values flow through this pipeline:
+
+[source]
+----
+PostgreSQL result set
+    │
+    ▼
+JDBC driver (SQL → Java type coercion)
+    │
+    ▼
+RAD-column-reader (query.clj)
+    ├─ JSON column → jsonista/read-value
+    ├─ CLOB column → convert to string
+    ├─ TIMESTAMP → java.sql.Timestamp
+    └─ else → .getObject (default JDBC handling)
+    │
+    ▼
+ReadableColumn protocol extensions (result_set.clj)
+    └─ Array → Clojure vector
+    │
+    ▼
+Clojure map (kebab-case keys)
+----
+
+==== RAD Column Reader
+
+[source,clojure]
+----
+;; From query.clj
+(defn RAD-column-reader
+  [^ResultSet rs ^ResultSetMetaData md ^Integer i]
+  (let [col-type (.getColumnType md i)
+        col-type-name (.getColumnTypeName md i)]
+    (cond
+      (= col-type-name "JSON")
+      (j/read-value (.getObject rs i))
+
+      (= col-type Types/CLOB)
+      (rs/clob->string (.getClob rs i))
+
+      (#{Types/TIMESTAMP Types/TIMESTAMP_WITH_TIMEZONE} col-type)
+      (.getTimestamp rs i)
+
+      :else
+      (.getObject rs i))))
+----
+
+==== ReadableColumn Extensions
+
+[source,clojure]
+----
+;; From result_set.clj
+(defn coerce-result-sets! []
+  (extend-protocol jdbc.rs/ReadableColumn
+    Array
+    (read-column-by-label [v _] (vec (.getArray v)))
+    (read-column-by-index [v _ _] (vec (.getArray v)))))
+----
+
+=== Pipeline Asymmetry
+
+IMPORTANT: Write transformers (`::sql/model->sql-value`) are applied automatically during save operations. However, read transformers (`::sql/sql->model-value`) are NOT automatically applied. If you need custom deserialization, you must handle it in a custom resolver or manually apply the transformer.
+
+== Datomic vs SQL Adapter Comparison
+
+The Datomic adapter supports more types than the SQL adapter:
+
+[cols="1,1,1"]
+|===
+|Aspect |Datomic |SQL
+
+|**Type count**
+|16 types
+|10 types
+
+|**Numeric types**
+|`:int`, `:long`, `:double`, `:float`, `:decimal`, `:bigdec`, `:bigint`
+|`:int`, `:long`, `:decimal`
+
+|**String types**
+|`:string`, `:password`, `:keyword`, `:symbol`, `:uri`
+|`:string`, `:password`, `:keyword`, `:symbol`
+
+|**Temporal**
+|`:instant`
+|`:instant`
+
+|**Other**
+|`:boolean`, `:uuid`, `:enum`, `:ref`, `:tuple`
+|`:boolean`, `:uuid`, `:enum`, `:ref`
+|===
+
+=== Types Unique to Datomic
+
+* `:uri` - Native URI type
+* `:double` - Double precision floating point
+* `:float` - Single precision floating point
+* `:bigdec` - Arbitrary precision decimal
+* `:bigint` - Arbitrary precision integer
+* `:tuple` - Composite indexed type for efficient pagination
+
+=== Key Differences
+
+==== Enum Storage
+
+[cols="1,2"]
+|===
+|Adapter |Approach
+
+|Datomic
+|Entity refs to entities with well-known idents (semantic)
+
+|SQL
+|VARCHAR(200) strings (pragmatic)
+|===
+
+==== Component Entities
+
+[cols="1,2"]
+|===
+|Adapter |Approach
+
+|Datomic
+|Native `:db/isComponent` with automatic cascade deletion
+
+|SQL
+|Manual via `::sql/delete-referent?` option
+|===
+
+==== Reference Handling
+
+[cols="1,2"]
+|===
+|Adapter |Approach
+
+|Datomic
+|`:db.type/ref` system with entity identity
+
+|SQL
+|Foreign key columns with explicit constraints
+|===
+
+== Type Extensibility
+
+=== Primary Extension: Value Transformers
+
+The main way to extend type handling is through attribute-level transformers:
+
+[source,clojure]
+----
+(require '[jsonista.core :as j])
+
+(defattr app-config :app/config :string
+  {::attr/schema :production
+   ::attr/identities #{:app/id}
+   ::sql/max-length 4096
+   ;; Write: Clojure map → JSON string
+   ::sql/model->sql-value j/write-value-as-string
+   ;; Read: JSON string → Clojure map
+   ::sql/sql->model-value j/read-value})
+----
+
+This approach:
+
+* Works immediately with existing schema generation
+* Type-safe at the Clojure level
+* No database schema changes needed
+* Recommended for custom types like JSON, EDN, or encrypted values
+
+=== Secondary Extension: ReadableColumn Protocol
+
+For JDBC-level type handling, extend the `ReadableColumn` protocol:
+
+[source,clojure]
+----
+(extend-protocol jdbc.rs/ReadableColumn
+  org.postgresql.util.PGobject
+  (read-column-by-label [v _]
+    (let [type (.getType v)
+          value (.getValue v)]
+      (case type
+        "jsonb" (j/read-value value)
+        "json" (j/read-value value)
+        v)))
+  (read-column-by-index [v _ _]
+    (read-column-by-label v nil)))
+----
+
+This approach:
+
+* Handles PostgreSQL-specific types at the JDBC level
+* Useful for native JSONB, arrays, or geometric types
+* Requires protocol extension in your application startup
+
+=== Tertiary Extension: Custom Column Reader
+
+Create a custom column reader for full control:
+
+[source,clojure]
+----
+(defn custom-column-reader
+  [^ResultSet rs ^ResultSetMetaData md ^Integer i]
+  (let [col-type (.getColumnType md i)
+        col-type-name (.getColumnTypeName md i)]
+    (case col-type-name
+      "JSONB" (j/read-value (.getObject rs i))
+      "TEXT" (.getString rs i)
+      ;; Fall back to default
+      (.getObject rs i))))
+
+(def custom-row-builder
+  (rs/as-maps-adapter rs/as-unqualified-kebab-maps custom-column-reader))
+----
+
+=== Limitations
+
+The `type-map` in `migration.clj` is **not extensible** without modifying source code. Adding native support for types like `:jsonb` or `:text` in schema generation requires forking or contributing to the library.
+
+[source,clojure]
+----
+;; This map is hardcoded - not runtime extensible
+(def type-map
+  {:string "VARCHAR(2048)"
+   :password "VARCHAR(512)"
+   ...})
+----
+
+Unsupported types fall back to `TEXT` with a logged error.
+
+== Type Validation
+
+=== Validation Layers
+
+RAD does NOT validate that data matches declared types at runtime in Clojure code. Instead, validation happens at multiple layers:
+
+[cols="1,2,2"]
+|===
+|Layer |What's Validated |When
+
+|**Definition**
+|Attribute structure via guardrails specs
+|Compile/load time
+
+|**Schema Generation**
+|Type→SQL mapping exists
+|Migration time
+
+|**Form UI**
+|`::attr/required?` and `::attr/valid?` predicates
+|User input time
+
+|**Database**
+|Constraints (type, length, nulls, encoding)
+|Insert/update time
+|===
+
+=== Form-Level Validation
+
+The `valid-value?` function validates form input:
+
+[source,clojure]
+----
+;; From attributes.cljc
+(defn valid-value?
+  [{::keys [required? type valid?] :as attribute} value props k]
+  (let [ref? (= :ref type)
+        non-empty-value? (and (some? value)
+                              (or (not ref?) (not (empty? value)))
+                              (or (not (string? value))
+                                  (pos? (count (str/trim value)))))]
+    (or
+      (and (nil? value) (not required?))
+      (if valid?
+        (valid? value props k)
+        (or (not required?) non-empty-value?)))))
+----
+
+This validates:
+
+* Required fields have values
+* Custom `::attr/valid?` predicates pass
+* It does NOT validate the data type
+
+=== Database-Level Validation
+
+PostgreSQL enforces type constraints. Errors are caught and wrapped:
+
+[source,clojure]
+----
+;; From resolvers.clj
+(defn error-condition [^PSQLException e]
+  (case (.getSQLState e)
+    "22001" ::string-data-too-long      ;; VARCHAR length exceeded
+    "22021" ::invalid-encoding          ;; Null bytes or encoding errors
+    "22P02" ::invalid-text-representation ;; Type conversion failed
+    "23502" ::not-null-violation        ;; NOT NULL constraint failed
+    "23505" ::unique-violation          ;; UNIQUE constraint violated
+    "23514" ::check-violation           ;; CHECK constraint failed
+    "40001" ::serialization-failure     ;; Transaction conflict
+    ::unknown))
+----
+
+=== Validation Flow Diagram
+
+[source]
+----
+┌─────────────────────────────────────────────────────────────┐
+│ 1. DEFINITION TIME                                          │
+│    - Attribute type declared with ::attr/type keyword       │
+│    - Guardrails specs validate the attribute definition     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. SCHEMA GENERATION TIME                                   │
+│    - RAD type → SQL type mapping via type-map              │
+│    - Unmapped types log error and default to TEXT           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. UI/FORM VALIDATION (Client-Side)                         │
+│    - valid-value? checks required? and valid? predicates   │
+│    - Type is NOT validated at this layer                   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 4. SAVE/MARSHAL TIME                                        │
+│    - form->sql-value coerces values (optional)             │
+│    - Type checking: NONE - assumes correct type            │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 5. DATABASE CONSTRAINT TIME                                 │
+│    - PostgreSQL enforces column types and constraints       │
+│    - Errors wrapped in structured ::save-error             │
+└─────────────────────────────────────────────────────────────┘
+----
+
+== Architecture Summary
+
+[source]
+----
+┌─────────────────────────────────────────────────────────────┐
+│                    RAD ATTRIBUTE                            │
+│  ::type = :string | :int | :uuid | :ref | :enum | ...      │
+│  ::sql/model->sql-value = (fn [v] ...)  ; optional         │
+│  ::sql/sql->model-value = (fn [v] ...)  ; optional         │
+└─────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┴─────────────────────┐
+        ▼                                           ▼
+┌───────────────────┐                    ┌───────────────────┐
+│   WRITE PATH      │                    │    READ PATH      │
+│                   │                    │                   │
+│ form->sql-value   │                    │ RAD-column-reader │
+│ (auto-applied)    │                    │ ReadableColumn    │
+│       │           │                    │ (auto-applied)    │
+│       ▼           │                    │       │           │
+│ HoneySQL → SQL    │                    │       ▼           │
+│       │           │                    │ sql->model-value  │
+│       ▼           │                    │ (NOT auto-applied)│
+│ JDBC → PostgreSQL │                    │                   │
+└───────────────────┘                    └───────────────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │    PostgreSQL     │
+                    │                   │
+                    │ Type constraints  │
+                    │ Length limits     │
+                    │ NOT NULL          │
+                    │ CHECK constraints │
+                    └───────────────────┘
+----
+
+== Key Takeaways
+
+1. **Open type system:** RAD types are just keywords - no closed enumeration
+2. **Adapter responsibility:** Each database adapter maps RAD types to native types
+3. **Write transformers auto-apply:** `::sql/model->sql-value` is called during saves
+4. **Read transformers don't auto-apply:** `::sql/sql->model-value` must be handled manually
+5. **Database validates types:** PostgreSQL catches type mismatches, not the adapter
+6. **Extensibility via transformers:** Custom types work best with value transformers
+7. **SQL is a Datomic subset:** All SQL types exist in Datomic, but not vice versa
