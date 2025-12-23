@@ -5,11 +5,10 @@
    [camel-snake-kebab.core :as csk]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
-   [com.fulcrologic.guardrails.core :refer [>defn => |]]
+   [com.fulcrologic.guardrails.core :refer [>defn =>]]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-   [taoensso.encore :as enc]
-   [taoensso.timbre :as log]))
+   [taoensso.encore :as enc]))
 
 (>defn table-name
        "Get the table name for a given identity key"
@@ -30,11 +29,6 @@
           (throw (ex-info "You must use an id-attribute with table-name" {:non-id-key qualified-key})))
         (or (some-> table csk/->snake_case)
             (some-> qualified-key namespace csk/->snake_case))))
-
-(defn attr->table-name
-  "DEPRECATED. use `table-name` on an id attr. This one cannot be correct, since an attr can be on more than one tbl"
-  ([k->attr {:keys [::attr/identities ::rad.sql/table]}]
-   (or table (get-in k->attr [(first identities) ::rad.sql/table]))))
 
 (defn column-name
   "Get the column name for the given attribute."
@@ -64,8 +58,6 @@
 (defn sequence-name [id-attribute]
   (str (name (table-name id-attribute)) "_" (name (column-name id-attribute)) "_seq"))
 
-(def attr->column-name column-name)
-
 (defn tables-and-columns
   "Return a sequence of [table-name column-name] that the given attribute appears at."
   [key->attribute {::attr/keys [identity? identities] :as attribute}]
@@ -78,12 +70,3 @@
          (let [id-attribute (key->attribute id-key)]
            [(table-name id-attribute) col-name]))
        identities))))
-
-(defn attrs->sql-col-index
-  "Takes a list of rad attributes and returns an index of the form
-  `{[table column] :qualified/keyword}`"
-  [k->attr]
-  (into {}
-        (mapcat
-         (fn [attr] (map (fn [k] [k attr]) (tables-and-columns k->attr attr)))
-         (vals k->attr))))
