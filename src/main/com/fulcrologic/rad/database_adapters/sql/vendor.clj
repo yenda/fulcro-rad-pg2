@@ -1,7 +1,7 @@
 (ns com.fulcrologic.rad.database-adapters.sql.vendor
   (:require
-    [clojure.spec.alpha :as s]
-    [next.jdbc :as jdbc]))
+   [clojure.spec.alpha :as s]
+   [next.jdbc :as jdbc]))
 
 (defprotocol VendorAdapter
   (relax-constraints! [this datasource] "Try to defer constraint checking until the end of txn.")

@@ -1,12 +1,12 @@
 (ns com.fulcrologic.rad.database-adapters.sql.plugin
   (:require
-    [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
-    [com.fulcrologic.rad.attributes :as attr]
-    [com.fulcrologic.rad.database-adapters.sql :as sql]
-    [com.fulcrologic.rad.database-adapters.sql.result-set :as sql.rs]
-    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
-    [taoensso.encore :as enc]
-    [taoensso.timbre :as log]))
+   [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
+   [com.fulcrologic.rad.attributes :as attr]
+   [com.fulcrologic.rad.database-adapters.sql :as sql]
+   [com.fulcrologic.rad.database-adapters.sql.result-set :as sql.rs]
+   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+   [taoensso.encore :as enc]
+   [taoensso.timbre :as log]))
 
 (sql.rs/coerce-result-sets!)
 
@@ -25,24 +25,24 @@
   ([all-attributes database-mapper config] (wrap-env all-attributes nil database-mapper config))
   ([all-attributes base-wrapper database-mapper config]
    (let [database-configs (get config ::sql/databases)
-         default-adapter  (vendor/->H2Adapter)
-         vendor-adapters  (reduce-kv
-                           (fn [acc k v]
-                             (let [{:sql/keys [vendor schema]} v
-                                   adapter (case vendor
-                                             :postgresql (do
-                                                           (log/info k "using PostgreSQL Adapter for schema" schema)
-                                                           (vendor/->PostgreSQLAdapter))
-                                             :h2 (do
-                                                   (log/info k "using H2 Adapter for schema" schema)
-                                                   (vendor/->H2Adapter))
-                                             :mariadb (do
-                                                        (log/info k "using MariaDB Adapter for schema" schema)
-                                                        (vendor/->MariaDBAdapter))
-                                             default-adapter)]
-                               (assoc acc schema adapter)))
-                           {}
-                           database-configs)]
+         default-adapter (vendor/->H2Adapter)
+         vendor-adapters (reduce-kv
+                          (fn [acc k v]
+                            (let [{:sql/keys [vendor schema]} v
+                                  adapter (case vendor
+                                            :postgresql (do
+                                                          (log/info k "using PostgreSQL Adapter for schema" schema)
+                                                          (vendor/->PostgreSQLAdapter))
+                                            :h2 (do
+                                                  (log/info k "using H2 Adapter for schema" schema)
+                                                  (vendor/->H2Adapter))
+                                            :mariadb (do
+                                                       (log/info k "using MariaDB Adapter for schema" schema)
+                                                       (vendor/->MariaDBAdapter))
+                                            default-adapter)]
+                              (assoc acc schema adapter)))
+                          {}
+                          database-configs)]
      (fn [env]
        (cond-> (let [database-connection-map (database-mapper env)]
                  (assoc env

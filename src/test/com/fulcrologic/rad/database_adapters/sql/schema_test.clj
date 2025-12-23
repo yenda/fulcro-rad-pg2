@@ -247,7 +247,7 @@
   (prop/for-all [attr gen-to-many-ref-attr]
                 (try
                   (schema/column-name attr)
-                  false  ;; Should have thrown
+                  false ;; Should have thrown
                   (catch clojure.lang.ExceptionInfo e
                     (and (= "Cannot calculate column name for to-many ref without k->attr."
                             (.getMessage e))

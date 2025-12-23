@@ -467,12 +467,12 @@
   (testing "Unicode characters are properly stored and retrieved"
     (with-test-db
       (fn [ds env]
-        (let [unicode-strings ["日本語テスト"        ;; Japanese
-                               "Ümläüts"            ;; German umlauts
-                               "🎉 Emoji 🚀"        ;; Emoji
-                               "Привет мир"         ;; Russian
-                               "مرحبا"              ;; Arabic
-                               "中文测试"]]          ;; Chinese
+        (let [unicode-strings ["日本語テスト" ;; Japanese
+                               "Ümläüts" ;; German umlauts
+                               "🎉 Emoji 🚀" ;; Emoji
+                               "Привет мир" ;; Russian
+                               "مرحبا" ;; Arabic
+                               "中文测试"]] ;; Chinese
           (doseq [unicode-str unicode-strings]
             (let [tempid (tempid/tempid)
                   delta {[:account/id tempid]
@@ -487,12 +487,12 @@
   (testing "Special characters are properly stored"
     (with-test-db
       (fn [ds env]
-        (let [special-strings ["O'Brien"                  ;; Single quote
-                               "John \"The Boss\" Smith"  ;; Double quotes
-                               "Line1\nLine2"             ;; Newline
-                               "Tab\there"                ;; Tab
-                               "Back\\slash"              ;; Backslash
-                               "Semi;colon"               ;; Semicolon
+        (let [special-strings ["O'Brien" ;; Single quote
+                               "John \"The Boss\" Smith" ;; Double quotes
+                               "Line1\nLine2" ;; Newline
+                               "Tab\there" ;; Tab
+                               "Back\\slash" ;; Backslash
+                               "Semi;colon" ;; Semicolon
                                "   leading spaces"
                                "trailing spaces   "]]
           (doseq [special-str special-strings]
@@ -573,11 +573,11 @@
         ;; - 2 existing addresses (one will be updated, one referenced by new account)
         (let [;; Existing accounts
               alice-id (ids/new-uuid)
-              bob-id (ids/new-uuid)      ;; will be deleted
-              charlie-id (ids/new-uuid)  ;; left untouched
+              bob-id (ids/new-uuid) ;; will be deleted
+              charlie-id (ids/new-uuid) ;; left untouched
               ;; Existing addresses
-              hq-address-id (ids/new-uuid)      ;; will be updated
-              branch-address-id (ids/new-uuid)]  ;; will be referenced by new account]
+              hq-address-id (ids/new-uuid) ;; will be updated
+              branch-address-id (ids/new-uuid)] ;; will be referenced by new account]
 
           ;; Insert existing data
           (sql/insert! ds :accounts {:id alice-id :name "Alice" :email "alice@old.com" :active true})

@@ -1,12 +1,11 @@
 (ns com.fulcrologic.rad.database-adapters.sql.connection
   (:require
-    [com.fulcrologic.rad.database-adapters.sql.migration :as sql.migration]
-    [com.fulcrologic.rad.database-adapters.sql           :as rad.sql]
-    [taoensso.encore                                     :as enc]
-    [taoensso.timbre                                     :as log])
+   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.migration :as sql.migration]
+   [taoensso.encore :as enc]
+   [taoensso.timbre :as log])
   (:import (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.util Properties)))
-
 
 (defn- create-pool
   "Create a HikariDataSource for connection pooling from a properties filename."
@@ -21,21 +20,19 @@
     (catch Exception e
       (log/error "Unable to create Hikari Datasource: " (.getMessage e)))))
 
-
 (defn stop-connection-pools! [connection-pools]
   (doseq [[k ^HikariDataSource p] connection-pools]
     (log/info "Shutting down pool " k)
     (.close p)))
 
-
 (defn create-connection-pools! [config all-attributes]
   (enc/if-let [databases (get config ::rad.sql/databases)
                pools (reduce
-                       (fn [pools [dbkey dbconfig]]
-                         (log/info (str "Creating connection pool for " dbkey))
-                         (assoc pools
-                           dbkey (create-pool (:hikaricp/config dbconfig))))
-                       {} databases)]
+                      (fn [pools [dbkey dbconfig]]
+                        (log/info (str "Creating connection pool for " dbkey))
+                        (assoc pools
+                               dbkey (create-pool (:hikaricp/config dbconfig))))
+                      {} databases)]
     (try
       (sql.migration/migrate! config all-attributes pools)
       pools

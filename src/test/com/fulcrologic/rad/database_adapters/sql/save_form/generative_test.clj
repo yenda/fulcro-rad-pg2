@@ -46,17 +46,17 @@
    "\" OR \"1\"=\"1"])
 
 (def special-char-strings
-  ["O'Brien"                    ;; Single quote - SQL escape testing
-   "John \"The Boss\" Smith"    ;; Double quotes
-   "Line1\nLine2"               ;; Newline
-   "Tab\there"                  ;; Tab
-   "Back\\slash"                ;; Backslash
-   "Semi;colon"                 ;; Semicolon
-   "Percent%sign"               ;; Percent (SQL LIKE wildcard)
-   "Under_score"                ;; Underscore (SQL LIKE wildcard)
-   "日本語テスト"                ;; Japanese
-   "Ümläüts"                    ;; Umlauts
-   "🎉 Emoji 🚀"                ;; Emoji
+  ["O'Brien" ;; Single quote - SQL escape testing
+   "John \"The Boss\" Smith" ;; Double quotes
+   "Line1\nLine2" ;; Newline
+   "Tab\there" ;; Tab
+   "Back\\slash" ;; Backslash
+   "Semi;colon" ;; Semicolon
+   "Percent%sign" ;; Percent (SQL LIKE wildcard)
+   "Under_score" ;; Underscore (SQL LIKE wildcard)
+   "日本語テスト" ;; Japanese
+   "Ümläüts" ;; Umlauts
+   "🎉 Emoji 🚀" ;; Emoji
    ;; Note: \u0000 null bytes are rejected by PostgreSQL - not testing
    "   leading spaces"
    "trailing spaces   "
@@ -64,10 +64,10 @@
 
 (def boundary-strings
   ;; Note: varchar(200) in test schema, so staying under that limit
-  [""                                           ;; Empty string
-   "x"                                          ;; Single char
-   (apply str (repeat 199 "x"))                 ;; Just under limit
-   (apply str (repeat 200 "x"))])               ;; At limit
+  ["" ;; Empty string
+   "x" ;; Single char
+   (apply str (repeat 199 "x")) ;; Just under limit
+   (apply str (repeat 200 "x"))]) ;; At limit
 
 (def gen-nasty-string
   "Generator for strings that might break things"
@@ -82,8 +82,8 @@
 
 (def gen-string-value
   "Generator for string field values - mixes nice and nasty"
-  (gen/frequency [[7 gen-nice-string]      ;; 70% normal strings
-                  [3 gen-nasty-string]]))  ;; 30% problematic strings
+  (gen/frequency [[7 gen-nice-string] ;; 70% normal strings
+                  [3 gen-nasty-string]])) ;; 30% problematic strings
 
 (def gen-boolean-value
   "Generator for boolean field values"
@@ -95,8 +95,8 @@
    [[7 (gen/fmap (fn [[name domain]]
                    (str name "@" domain ".com"))
                  (gen/tuple gen-nice-string gen-nice-string))]
-    [1 (gen/return "")]                              ;; Empty email
-    [1 (gen/return "not-an-email")]                  ;; Invalid format
+    [1 (gen/return "")] ;; Empty email
+    [1 (gen/return "not-an-email")] ;; Invalid format
     [1 (gen/return "test@evil.com'; DROP TABLE--")] ;; SQL injection in email
     ]))
 
@@ -300,7 +300,7 @@
                           ;; Get the first account tempid and its real id
                           account-entries (filter #(= "account" (namespace (ffirst %))) insert-delta)]
                       (if (empty? account-entries)
-                        true  ;; Skip if no accounts in delta
+                        true ;; Skip if no accounts in delta
                         (let [account-tempid (second (first (first account-entries)))
                               real-id (get (:tempids insert-result) account-tempid)
                               ;; Create an update delta
@@ -369,7 +369,7 @@
                   (fn [conn env]
                     ;; SETUP: Create existing entities to update/delete/reference
                     (let [existing-account-1-id (ids/new-uuid)
-                          existing-account-2-id (ids/new-uuid)  ;; will be deleted
+                          existing-account-2-id (ids/new-uuid) ;; will be deleted
                           existing-address-id (ids/new-uuid)]
 
                       ;; Insert existing data directly
@@ -520,7 +520,7 @@
                   (fn [conn env]
                     (try
                       (resolvers/save-form! env {::rad.form/delta chaos-delta})
-                      false  ;; Should have thrown - test fails if we get here
+                      false ;; Should have thrown - test fails if we get here
                       (catch clojure.lang.ExceptionInfo e
                         (let [data (ex-data e)]
                           (and

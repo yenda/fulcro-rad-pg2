@@ -35,7 +35,7 @@
 (def ^:deprecated form->sql-value "DEPRECATED. See model->sql-value."
   :com.fulcrologic.rad.database-adapters.sql/form->sql-value)
 
-(def  model->sql-value
+(def model->sql-value
   "Attribute option. A `(fn [clj-value] sql-value)`. When defined, the
   writes via the plugin's form save this function will call this to convert the model value into
   something acceptable to the low-level JDBC call (see `next.jdbc.sql/execute!`).

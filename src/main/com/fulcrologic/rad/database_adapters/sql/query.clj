@@ -48,7 +48,7 @@
         schema
         resolver-input]
        [any? vector? keyword? coll? => (? coll?)]
-       (let [datasource        (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))]
+       (let [datasource (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))]
          (timer "SQL query with execute!"
                 (jdbc/execute! datasource query {:builder-fn row-builder})
                 {:query query})))

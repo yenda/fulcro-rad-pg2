@@ -11,5 +11,5 @@
   []
   (extend-protocol jdbc.rs/ReadableColumn
     Array
-    (read-column-by-label [v _]   (vec (.getArray v)))
+    (read-column-by-label [v _] (vec (.getArray v)))
     (read-column-by-index [v _ _] (vec (.getArray v)))))
