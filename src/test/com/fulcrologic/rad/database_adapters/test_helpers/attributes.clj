@@ -3,7 +3,7 @@
 
    Types covered:
    - :string, :password, :boolean, :int, :long, :decimal
-   - :instant, :inst, :enum, :keyword, :symbol, :uuid
+   - :instant, :enum, :keyword, :symbol, :uuid
 
    Options covered:
    - table, column-name, max-length
@@ -180,15 +180,12 @@
   {::rad.attr/schema :production
    ::rad.attr/identities #{:event/id}})
 
-;; :inst type -> BIGINT (epoch millis, legacy clojure.instant)
-(defattr event-created-at :event/created-at :inst
+;; Another instant for end time
+(defattr event-ends-at :event/ends-at :instant
   {::rad.attr/schema :production
-   ::rad.attr/identities #{:event/id}
-   ;; Example of custom transformers
-   ::rad.sql/form->sql-value (fn [inst] (when inst (.toEpochMilli inst)))
-   ::rad.sql/sql->form-value (fn [millis] (when millis (Instant/ofEpochMilli millis)))})
+   ::rad.attr/identities #{:event/id}})
 
-(def event-attributes [event-id event-name event-starts-at event-created-at])
+(def event-attributes [event-id event-name event-starts-at event-ends-at])
 
 ;; =============================================================================
 ;; Category - demonstrates self-referential and delete-referent?

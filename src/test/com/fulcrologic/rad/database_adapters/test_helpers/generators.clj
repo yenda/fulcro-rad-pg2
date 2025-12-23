@@ -4,7 +4,7 @@
    Generators for types:
    - Strings (normal, nasty, boundary)
    - Numeric (int, long, decimal)
-   - Temporal (instant, inst/epoch)
+   - Temporal (instant)
    - Boolean, Enum, Keyword, Symbol, Password
    - UUID, Tempid
 
@@ -140,12 +140,6 @@
   (gen/fmap (fn [epoch-seconds]
               (Instant/ofEpochSecond epoch-seconds))
             (gen/choose 946684800 1893456000))) ; 2000-01-01 to 2030-01-01
-
-(def gen-inst-value
-  "Generator for :inst type (epoch milliseconds as long)"
-  (gen/fmap (fn [instant]
-              (.toEpochMilli instant))
-            gen-instant-value))
 
 ;; =============================================================================
 ;; Boolean Generator
@@ -304,15 +298,15 @@
 ;; =============================================================================
 
 (def gen-event-insert
-  "Generator for an event insert - tests instant and inst types"
+  "Generator for an event insert - tests instant type"
   (gen/let [tempid gen-tempid
             name gen-string-value
             starts-at gen-instant-value
-            created-at gen-inst-value]
+            ends-at gen-instant-value]
     {[:event/id tempid]
      {:event/name {:after name}
       :event/starts-at {:after starts-at}
-      :event/created-at {:after created-at}}}))
+      :event/ends-at {:after ends-at}}}))
 
 ;; =============================================================================
 ;; Category Delta Generators (tests self-referential)
@@ -392,11 +386,11 @@
             category gen-keyword-value
             status gen-symbol-value
             api-key gen-password-value
-            ;; Event (instant, inst)
+            ;; Event (instant)
             event-tempid gen-tempid
             event-name gen-string-value
             starts-at gen-instant-value
-            created-at gen-inst-value]
+            ends-at gen-instant-value]
     {[:account/id account-tempid]
      {:account/name {:after account-name}
       :account/active? {:after account-active}
@@ -418,7 +412,7 @@
      [:event/id event-tempid]
      {:event/name {:after event-name}
       :event/starts-at {:after starts-at}
-      :event/created-at {:after created-at}}}))
+      :event/ends-at {:after ends-at}}}))
 
 ;; =============================================================================
 ;; Chaos Mode Generators (Invalid Data)

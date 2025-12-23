@@ -21,7 +21,6 @@
    :long "BIGINT"
    :decimal "decimal(20,2)"
    :instant "TIMESTAMP WITH TIME ZONE"
-   :inst "BIGINT"
    ;; There is no standard SQL enum, and many ppl think they are a bad idea in general. Given
    ;; that we have other ways of enforcing them we use a standard type instead.
    :enum "VARCHAR(200)"
