@@ -1,0 +1,19 @@
+{:paths ["bin"]
+ :deps {babashka/fs {:mvn/version "0.5.21"}}
+
+ :tasks
+ {:requires ([tasks.format :as fmt]
+             [tasks.lint :as lint]
+             [tasks.check :as chk])
+
+  format {:doc "Check and optionally fix formatting with cljfmt"
+          :task (fmt/format-task)}
+
+  lint {:doc "Run clj-kondo linter"
+        :task (lint/lint)}
+
+  lint:install-configs {:doc "Install clj-kondo configs for dependencies"
+                        :task (lint/install-configs)}
+
+  check {:doc "Run all hygiene checks (format + lint)"
+         :task (chk/check)}}}

@@ -1,0 +1,37 @@
+{:linters
+ {:unused-binding {:level :warning}
+  :unused-namespace {:level :warning}
+  :unused-referred-var {:level :warning}
+  :unresolved-symbol {:level :error}
+  :unresolved-var {:level :warning}
+  :type-mismatch {:level :warning}
+  ;; enc/if-let uses multiple bindings which clj-kondo doesn't understand
+  :if-let-wrong-arity {:level :off}
+  :cond-without-else {:level :off}}
+
+ :lint-as
+ {com.wsscode.pathom3.connect.operation/defresolver clojure.core/defn}
+
+ ;; Skip lint for files that use complex macros
+ :config-in-ns
+ {com.fulcrologic.rad.database-adapters.sql.migration
+  {:linters {:unresolved-symbol {:level :off}
+             :format {:level :off}}}
+  com.fulcrologic.rad.database-adapters.sql.connection
+  {:linters {:unresolved-symbol {:level :off}}}
+  com.fulcrologic.rad.database-adapters.sql.schema
+  {:linters {:unresolved-symbol {:level :off}
+             :invalid-arity {:level :off}
+             :inline-def {:level :off}
+             :clj-kondo.fulcro.>defn/signature-mismatch {:level :off}}}
+  com.fulcrologic.rad.database-adapters.sql.query
+  {:linters {:unresolved-symbol {:level :off}}}
+  com.fulcrologic.rad.database-adapters.sql.plugin
+  {:linters {:invalid-arity {:level :off}}}
+  com.fulcrologic.rad.database-adapters.sql.resolvers-test
+  {:linters {:invalid-arity {:level :off}}}
+  ;; Test namespaces with defproperty macro
+  com.fulcrologic.rad.database-adapters.sql.schema-test
+  {:linters {:unresolved-symbol {:level :off}}}
+  com.fulcrologic.rad.database-adapters.sql.save-form.generative-test
+  {:linters {:unresolved-symbol {:level :off}}}}}

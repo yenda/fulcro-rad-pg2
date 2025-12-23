@@ -1,0 +1,16 @@
+{:paths ["src"]
+ :parallel? true
+
+ ;; Basic formatting options
+ :indentation? true
+ :indent-line-comments? true
+ :remove-surrounding-whitespace? true
+ :remove-trailing-whitespace? true
+ :insert-missing-whitespace? true
+ :remove-consecutive-blank-lines? true
+ :remove-multiple-non-indenting-spaces? true
+
+ ;; Sort namespace references alphabetically
+ :sort-ns-references? true
+
+ :function-arguments-indentation :community}
