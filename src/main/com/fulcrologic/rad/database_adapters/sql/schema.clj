@@ -55,8 +55,8 @@
       (column-name attr))))
   ([{::attr/keys [qualified-key cardinality type]
      ::rad.sql/keys [column-name]}]
-   #_(when (and (= :many cardinality) (= :ref type))
-       (throw (ex-info "Cannot calculate column name for to-many ref without k->attr." {:attr qualified-key})))
+   (when (and (= :many cardinality) (= :ref type))
+     (throw (ex-info "Cannot calculate column name for to-many ref without k->attr." {:attr qualified-key})))
    (or
     column-name
     (some-> qualified-key name csk/->snake_case))))
