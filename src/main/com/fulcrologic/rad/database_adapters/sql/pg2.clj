@@ -24,6 +24,7 @@
    ```"
   (:require
    [camel-snake-kebab.core :as csk]
+   [malli.experimental :as mx]
    [pg.core :as pg]
    [pg.pool :as pool]
    [taoensso.timbre :as log])
@@ -103,17 +104,19 @@
   [rad-type decoder-fn]
   (swap! decoders assoc rad-type decoder-fn))
 
-(defn encode-for-sql
+(mx/defn encode-for-sql :- [:maybe :any]
   "Transform Clojure value for SQL storage based on RAD type."
-  [rad-type value]
+  [rad-type :- :keyword
+   value :- [:maybe :any]]
   (when (some? value)
     (if-let [encoder (get @encoders rad-type)]
       (encoder value)
       value)))
 
-(defn decode-from-sql
+(mx/defn decode-from-sql :- [:maybe :any]
   "Transform SQL value to Clojure value based on RAD type."
-  [rad-type value]
+  [rad-type :- :keyword
+   value :- [:maybe :any]]
   (when (some? value)
     (if-let [decoder (get @decoders rad-type)]
       (decoder value)
@@ -229,26 +232,26 @@
 ;; Pool Management
 ;; =============================================================================
 
-(defn create-pool
+(mx/defn create-pool! :- :some
   "Create a pg2 connection pool from config."
-  [config]
+  [config :- :map]
   (let [pool-config (build-pool-config config)]
     (log/info "Creating pg2 connection pool" {:host (:host pool-config)
                                               :port (:port pool-config)
                                               :database (:database pool-config)})
     (pool/pool pool-config)))
 
-(defn close-pool
+(mx/defn close-pool! :- :nil
   "Close a pg2 connection pool."
-  [pool]
+  [pool :- :some]
   (pool/close pool))
 
-(defn stop-connection-pools!
+(mx/defn stop-connection-pools! :- :nil
   "Stop all connection pools."
-  [connection-pools]
+  [connection-pools :- [:map-of :keyword :some]]
   (doseq [[k pool] connection-pools]
     (log/info "Shutting down pool" k)
-    (close-pool pool)))
+    (close-pool! pool)))
 
 ;; =============================================================================
 ;; Performance Logging
@@ -271,29 +274,35 @@
 ;; Query Execution
 ;; =============================================================================
 
-(defn pg2-query!
+(mx/defn pg2-query! :- [:vector :map]
   "Execute a SQL query using pg2.
    Takes a pg2 pool and a HoneySQL-formatted query vector [sql & params].
    Returns a vector of maps with kebab-case keyword keys."
-  [pool [sql & params]]
-  (pool/with-conn [conn pool]
-    (let [pg2-sql (convert-params sql)
-          result (pg/execute conn pg2-sql {:params (vec params)})]
-      (mapv normalize-row result))))
+  [pool :- :some
+   query :- [:cat :string [:* :any]]]
+  (let [[sql & params] query]
+    (pool/with-conn [conn pool]
+      (let [pg2-sql (convert-params sql)
+            result (pg/execute conn pg2-sql {:params (vec params)})]
+        (mapv normalize-row result)))))
 
-(defn pg2-query-raw!
+(mx/defn pg2-query-raw! :- [:vector :map]
   "Execute a SQL query using pg2, returning raw results.
    Returns pg2's native format without normalization.
    Use with compiled row transformers for maximum performance."
-  [pool [sql & params]]
-  (pool/with-conn [conn pool]
-    (let [pg2-sql (convert-params sql)]
-      (pg/execute conn pg2-sql {:params (vec params)}))))
+  [pool :- :some
+   query :- [:cat :string [:* :any]]]
+  (let [[sql & params] query]
+    (pool/with-conn [conn pool]
+      (let [pg2-sql (convert-params sql)]
+        (pg/execute conn pg2-sql {:params (vec params)})))))
 
-(defn pg2-query-prepared!
+(mx/defn pg2-query-prepared! :- [:vector :map]
   "Execute a pre-compiled SQL query with array parameter.
    Uses $1::type[] syntax for 100% prepared statement cache hit rate."
-  [pool sql ids]
+  [pool :- :some
+   sql :- :string
+   ids :- [:sequential :any]]
   (pool/with-conn [conn pool]
     (pg/execute conn sql {:params [(vec ids)]})))
 

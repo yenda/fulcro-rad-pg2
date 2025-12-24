@@ -80,12 +80,12 @@
             _ (println "Data seeded, setting up pg2 pathom env...")
 
             ;; Create pg2 pool with schema in pg-params (string keys required)
-            pg2-pool (pg2/create-pool {:pg2/config {:host "localhost"
-                                                    :port 5432
-                                                    :user "user"
-                                                    :password "password"
-                                                    :database "fulcro-rad-pg2"
-                                                    :pg-params {"search_path" schema-name}}})
+            pg2-pool (pg2/create-pool! {:pg2/config {:host "localhost"
+                                                     :port 5432
+                                                     :user "user"
+                                                     :password "password"
+                                                     :database "fulcro-rad-pg2"
+                                                     :pg-params {"search_path" schema-name}}})
             _ (reset! pg2-pool* pg2-pool)
 
             ;; Build pathom env with pg2 - pool used directly, no wrapper needed

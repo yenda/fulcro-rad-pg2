@@ -45,10 +45,9 @@ This library uses the pg2 PostgreSQL driver for connection pooling.
 
 (defstate connection-pools
   :start
-  {:production (pg2/create-pool pg2-config)}
+  {:production (pg2/create-pool! pg2-config)}
   :stop
-  (doseq [[_ pool] connection-pools]
-    (pg.pool/close pool)))
+  (pg2/stop-connection-pools! connection-pools))
 -----
 
 The configuration options for the SQL adapter look like this:

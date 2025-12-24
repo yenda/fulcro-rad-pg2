@@ -17,6 +17,7 @@
    [diehard.core :as dh]
    [edn-query-language.core :as eql]
    [honey.sql :as sql]
+   [malli.experimental :as mx]
    [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.timbre :as log])
@@ -326,7 +327,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Main API
 
-(defn save-form!
+(mx/defn save-form! :- [:map [:tempids :map]]
   "Persist form mutations to the database.
 
    Architecture:
@@ -338,48 +339,51 @@
    6. EFFECT: Execute SQL plan in transaction
 
    Returns {:tempids {tempid -> real-id}}"
-  [{::attr/keys [key->attribute]
-    ::rad.sql/keys [connection-pools]
-    :as env}
-   {::rad.form/keys [delta]}]
-  (try
-    ;; PURE: Process delta to expand reference attributes
-    (let [delta (process-ref-attributes key->attribute delta)]
-      (log/debug "Saving form" {:schemas (schemas-for-delta env delta)})
+  [env :- [:map
+           [::attr/key->attribute :map]
+           [::rad.sql/connection-pools [:map-of :keyword :some]]]
+   params :- [:map [::rad.form/delta :map]]]
+  (let [{::attr/keys [key->attribute]
+         ::rad.sql/keys [connection-pools]} env
+        {::rad.form/keys [delta]} params]
+    (try
+      ;; PURE: Process delta to expand reference attributes
+      (let [delta (process-ref-attributes key->attribute delta)]
+        (log/debug "Saving form" {:schemas (schemas-for-delta env delta)})
 
-      ;; Process each schema
-      (reduce-kv
-       (fn [result schema pool]
-         ;; PURE: Plan how to allocate tempids
-         (let [tempid-plan (plan-tempids key->attribute delta)
+        ;; Process each schema
+        (reduce-kv
+         (fn [result schema pool]
+           ;; PURE: Plan how to allocate tempids
+           (let [tempid-plan (plan-tempids key->attribute delta)
 
-               ;; EFFECT: Allocate sequence IDs (single DB round-trip)
-               seq-tempids (dh/with-retry
-                             {:retry-if retryable?
-                              :max-retries 4
-                              :backoff-ms [100 200 2.0]}
-                             (allocate-sequence-ids! pool (:sequence-ids tempid-plan)))
+                 ;; EFFECT: Allocate sequence IDs (single DB round-trip)
+                 seq-tempids (dh/with-retry
+                               {:retry-if retryable?
+                                :max-retries 4
+                                :backoff-ms [100 200 2.0]}
+                               (allocate-sequence-ids! pool (:sequence-ids tempid-plan)))
 
-               ;; PURE: Resolve UUID tempids
-               uuid-tempids (resolve-uuid-tempids (:uuid-ids tempid-plan))
+                 ;; PURE: Resolve UUID tempids
+                 uuid-tempids (resolve-uuid-tempids (:uuid-ids tempid-plan))
 
-               ;; PURE: Combine all resolved tempids
-               tempids (merge seq-tempids uuid-tempids)
+                 ;; PURE: Combine all resolved tempids
+                 tempids (merge seq-tempids uuid-tempids)
 
-               ;; PURE: Generate SQL plan
-               sql-plan (delta->sql-plan key->attribute schema tempids delta)]
+                 ;; PURE: Generate SQL plan
+                 sql-plan (delta->sql-plan key->attribute schema tempids delta)]
 
-           ;; EFFECT: Execute plan in transaction (with retry)
-           (dh/with-retry
-             {:retry-if retryable?
-              :max-retries 4
-              :backoff-ms [100 200 2.0]}
-             (execute-plan! pool sql-plan))
+             ;; EFFECT: Execute plan in transaction (with retry)
+             (dh/with-retry
+               {:retry-if retryable?
+                :max-retries 4
+                :backoff-ms [100 200 2.0]}
+               (execute-plan! pool sql-plan))
 
-           ;; Accumulate tempids
-           (update result :tempids merge tempids)))
-       {:tempids {}}
-       connection-pools))
+             ;; Accumulate tempids
+             (update result :tempids merge tempids)))
+         {:tempids {}}
+         connection-pools))
 
-    (catch PSQLException e
-      (throw (wrap-save-error e)))))
+      (catch PSQLException e
+        (throw (wrap-save-error e))))))

@@ -8,13 +8,18 @@
    [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
    [com.wsscode.pathom3.connect.operation :as pco]
+   [malli.experimental :as mx]
    [taoensso.encore :as enc]
    [taoensso.timbre :as log]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Column/Table Helpers
 
-(defn get-column [attribute]
+(defn get-column
+  "Extract SQL column name from attribute.
+   Checks ::rad.sql/column-name, then :column, then derives from qualified-key name.
+   Returns a keyword for HoneySQL compatibility."
+  [attribute]
   (let [col (or (::rad.sql/column-name attribute)
                 (:column attribute)
                 (some-> (::attr/qualified-key attribute) name))]
@@ -22,7 +27,10 @@
       (keyword col)
       (throw (ex-info "Can't find column name for attribute" {:attribute attribute})))))
 
-(defn get-table [attribute]
+(defn get-table
+  "Extract SQL table name from attribute's ::rad.sql/table.
+   Returns a keyword for HoneySQL compatibility, or nil if not set."
+  [attribute]
   (some-> (::rad.sql/table attribute) keyword))
 
 (defn get-pg-array-type
@@ -36,7 +44,11 @@
     :string "text[]"
     "text[]"))
 
-(defn to-one-keyword [qualified-key]
+(defn to-one-keyword
+  "Convert a qualified ref keyword to its FK column keyword by appending -id.
+   E.g., :user/address -> :user/address-id
+   Used for forward refs where the FK column exists on the source table."
+  [qualified-key]
   (keyword (str (namespace qualified-key)
                 "/"
                 (name qualified-key)
@@ -46,6 +58,10 @@
 ;; Column Mapping
 
 (defn get-column->outputs
+  "Build mapping from SQL column keyword to Pathom output specification.
+   For scalar attributes: {:col [:attr-k]}
+   For to-one refs: {:col [:attr-id-k {:attr-k [:target-k]}]}
+   Skips to-many refs and reverse refs (handled by separate resolvers)."
   [id-attr-k id-attr->attributes k->attr target?]
   (let [{::attr/keys [cardinality qualified-key target] :as id-attribute} (k->attr id-attr-k)
         outputs (reduce (fn [acc {::attr/keys [cardinality qualified-key target]
@@ -130,20 +146,22 @@
              ::pco/batch? true
              ::pco/resolve
              (fn [env input]
-               (pg2/timer
-                "id-resolver"
-                (let [ids (mapv id-attr-k input)
-                      pool (get-in env [::rad.sql/connection-pools schema])
-                      rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
-                      results-by-id (reduce
-                                     (fn [acc row]
-                                       (let [result (pg2-transform-row row)]
-                                         (assoc acc (id-attr-k result) result)))
-                                     {}
-                                     rows)
-                      results (mapv (fn [id] (get results-by-id id)) ids)]
-                  (auth/redact env results))
-                {:op-name op-name}))
+               (let [ids (mapv id-attr-k input)]
+                 (if (empty? ids)
+                   []
+                   (pg2/timer
+                    "id-resolver"
+                    (let [pool (get-in env [::rad.sql/connection-pools schema])
+                          rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                          results-by-id (reduce
+                                         (fn [acc row]
+                                           (let [result (pg2-transform-row row)]
+                                             (assoc acc (id-attr-k result) result)))
+                                         {}
+                                         rows)
+                          results (mapv (fn [id] (get results-by-id id)) ids)]
+                      (auth/redact env results))
+                    {:op-name op-name}))))
              ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
       id-resolver)))
@@ -196,21 +214,23 @@
                     ::pco/batch? true
                     ::pco/resolve
                     (fn [env input]
-                      (pg2/timer
-                       "to-many-resolver"
-                       (let [ids (mapv id-attr-k input)
-                             pool (get-in env [::rad.sql/connection-pools schema])
-                             rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
-                             results-by-id (reduce (fn [acc {:keys [k v]}]
-                                                     (assoc acc k
-                                                            {attr-k (mapv (fn [v]
-                                                                            {target-k v})
-                                                                          v)}))
-                                                   {}
-                                                   rows)
-                             results (mapv #(get results-by-id %) ids)]
-                         (auth/redact env results))
-                       {:op-name op-name}))
+                      (let [ids (mapv id-attr-k input)]
+                        (if (empty? ids)
+                          []
+                          (pg2/timer
+                           "to-many-resolver"
+                           (let [pool (get-in env [::rad.sql/connection-pools schema])
+                                 rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                                 results-by-id (reduce (fn [acc {:keys [k v]}]
+                                                         (assoc acc k
+                                                                {attr-k (mapv (fn [v]
+                                                                                {target-k v})
+                                                                              v)}))
+                                                       {}
+                                                       rows)
+                                 results (mapv #(get results-by-id %) ids)]
+                             (auth/redact env results))
+                           {:op-name op-name}))))
                     ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
       entity-by-attribute-resolver)))
@@ -260,23 +280,27 @@
              ::pco/batch? true
              ::pco/resolve
              (fn [env input]
-               (pg2/timer
-                "to-one-resolver"
-                (let [ids (mapv id-attr-k input)
-                      pool (get-in env [::rad.sql/connection-pools schema])
-                      rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
-                      results-by-id (reduce
-                                     (fn [acc row]
-                                       (let [result (pg2-transform-row row)]
-                                         (assoc acc (get-in result [ref id-attr-k]) result)))
-                                     {}
-                                     rows)
-                      results (mapv (fn [id]
-                                      (when-let [outputs (get results-by-id id)]
-                                        (assoc outputs attr-k outputs)))
-                                    ids)]
-                  (auth/redact env results))
-                {:op-name op-name}))
+               (let [ids (mapv id-attr-k input)]
+                 (if (empty? ids)
+                   []
+                   (pg2/timer
+                    "to-one-resolver"
+                    (let [pool (get-in env [::rad.sql/connection-pools schema])
+                          rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                          results-by-id (reduce
+                                         (fn [acc row]
+                                           (let [result (pg2-transform-row row)]
+                                             (assoc acc (get-in result [ref id-attr-k]) result)))
+                                         {}
+                                         rows)
+                          ;; Return nil for missing entities - Pathom3 batch semantics
+                          ;; treat nil as "no data found for this input"
+                          results (mapv (fn [id]
+                                          (when-let [outputs (get results-by-id id)]
+                                            (assoc outputs attr-k outputs)))
+                                        ids)]
+                      (auth/redact env results))
+                    {:op-name op-name}))))
              ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
       one-to-one-resolver)))
@@ -284,9 +308,10 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Resolver Generation
 
-(defn generate-resolvers
+(mx/defn generate-resolvers :- [:vector :some]
   "Returns a sequence of resolvers that can resolve attributes from SQL databases."
-  [attributes schema]
+  [attributes :- [:sequential :map]
+   schema :- :keyword]
   (log/info "Generating resolvers for SQL schema" schema)
   (let [k->attr (enc/keys-by ::attr/qualified-key attributes)
         id-attr->attributes (->> attributes
