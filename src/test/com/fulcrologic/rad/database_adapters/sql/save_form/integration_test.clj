@@ -83,6 +83,18 @@
 (defn get-address [ds id]
   (first (jdbc/execute! ds ["SELECT * FROM addresses WHERE id = ?" id] jdbc-opts)))
 
+(defn get-document [ds id]
+  (first (jdbc/execute! ds ["SELECT * FROM documents WHERE id = ?" id] jdbc-opts)))
+
+(defn get-metadata [ds id]
+  (first (jdbc/execute! ds ["SELECT * FROM metadata WHERE id = ?" id] jdbc-opts)))
+
+(defn count-documents [ds]
+  (:count (first (jdbc/execute! ds ["SELECT COUNT(*) as count FROM documents"] jdbc-opts))))
+
+(defn count-metadata [ds]
+  (:count (first (jdbc/execute! ds ["SELECT COUNT(*) as count FROM metadata"] jdbc-opts))))
+
 (defn count-accounts [ds]
   (:count (first (jdbc/execute! ds ["SELECT COUNT(*) as count FROM accounts"] jdbc-opts))))
 
@@ -759,3 +771,240 @@
               (is (= 4 (count-accounts ds)) "Should end with 4 accounts")
               ;; Started: 2 addresses, +2 inserted = 4
               (is (= 4 (count-addresses ds)) "Should end with 4 addresses"))))))))
+
+;; =============================================================================
+;; One-to-One Reference Tests (Document/Metadata pattern)
+;;
+;; Pattern: Metadata owns the FK (metadata.document_id column)
+;; - document/metadata has `ref :metadata/document` and `delete-referent? true`
+;; - metadata/document stores the FK directly (no `ref`)
+;; - When document/metadata is changed, metadata.document_id is updated
+;; - When document/metadata is removed, the orphaned metadata is deleted
+;; =============================================================================
+
+(deftest test-one-to-one-insert-both-new
+  (testing "Insert document with new metadata (both tempids)"
+    (with-test-db
+      (fn [ds env]
+        (let [doc-tempid (tempid/tempid)
+              meta-tempid (tempid/tempid)
+              delta {[:document/id doc-tempid]
+                     {:document/title {:after "My Document"}
+                      :document/metadata {:after [:metadata/id meta-tempid]}}
+                     [:metadata/id meta-tempid]
+                     {:metadata/author {:after "John Doe"}
+                      :metadata/version {:after 1}}}
+              params {::rad.form/delta delta}
+
+              result (write/save-form! env params)
+
+              doc-real-id (get (:tempids result) doc-tempid)
+              meta-real-id (get (:tempids result) meta-tempid)]
+
+          ;; Both tempids should be resolved
+          (is (= 2 (count (:tempids result))) "Should resolve 2 tempids")
+          (is (uuid? doc-real-id) "Document should have real UUID")
+          (is (uuid? meta-real-id) "Metadata should have real UUID")
+
+          ;; Verify document was created
+          (let [doc (get-document ds doc-real-id)]
+            (is (some? doc) "Document should exist")
+            (is (= "My Document" (:title doc))))
+
+          ;; Verify metadata was created with FK pointing to document
+          (let [meta (get-metadata ds meta-real-id)]
+            (is (some? meta) "Metadata should exist")
+            (is (= "John Doe" (:author meta)))
+            (is (= 1 (:version meta)))
+            (is (= doc-real-id (:document_id meta)) "Metadata should have FK to document")))))))
+
+(deftest test-one-to-one-insert-with-existing-ref
+  (testing "Insert document referencing existing metadata"
+    (with-test-db
+      (fn [ds env]
+        ;; Setup: create metadata first (orphan, no document_id)
+        (let [meta-id (ids/new-uuid)]
+          (sql/insert! ds :metadata {:id meta-id :author "Jane Doe" :version 2})
+
+          ;; Create document with reference to existing metadata
+          (let [doc-tempid (tempid/tempid)
+                delta {[:document/id doc-tempid]
+                       {:document/title {:after "Another Document"}
+                        :document/metadata {:after [:metadata/id meta-id]}}}
+                params {::rad.form/delta delta}
+
+                result (write/save-form! env params)
+                doc-real-id (get (:tempids result) doc-tempid)]
+
+            ;; Only document tempid should be resolved
+            (is (= 1 (count (:tempids result))))
+
+            ;; Verify metadata now has FK to document
+            (let [meta (get-metadata ds meta-id)]
+              (is (= doc-real-id (:document_id meta))
+                  "Metadata should have FK updated to point to new document"))))))))
+
+(deftest test-one-to-one-update-reference
+  (testing "Update document's metadata reference to point to different metadata"
+    (with-test-db
+      (fn [ds env]
+        ;; Setup: create document with metadata
+        (let [doc-id (ids/new-uuid)
+              old-meta-id (ids/new-uuid)
+              new-meta-id (ids/new-uuid)]
+          (sql/insert! ds :documents {:id doc-id :title "Doc"})
+          (sql/insert! ds :metadata {:id old-meta-id :author "Old Author" :version 1 :document_id doc-id})
+          (sql/insert! ds :metadata {:id new-meta-id :author "New Author" :version 2})
+
+          ;; Update to point to new metadata
+          (let [delta {[:document/id doc-id]
+                       {:document/metadata {:before [:metadata/id old-meta-id]
+                                            :after [:metadata/id new-meta-id]}}}
+                params {::rad.form/delta delta}]
+
+            (write/save-form! env params)
+
+            ;; New metadata should have FK to document
+            (let [new-meta (get-metadata ds new-meta-id)]
+              (is (= doc-id (:document_id new-meta))))
+
+            ;; Old metadata should be DELETED (delete-referent? is true)
+            (is (nil? (get-metadata ds old-meta-id))
+                "Old metadata should be deleted due to delete-referent?")))))))
+
+(deftest test-one-to-one-remove-reference
+  (testing "Remove document's metadata reference (set to nil)"
+    (with-test-db
+      (fn [ds env]
+        ;; Setup: create document with metadata
+        (let [doc-id (ids/new-uuid)
+              meta-id (ids/new-uuid)]
+          (sql/insert! ds :documents {:id doc-id :title "Doc"})
+          (sql/insert! ds :metadata {:id meta-id :author "Author" :version 1 :document_id doc-id})
+
+          (is (= 1 (count-metadata ds)) "Should start with 1 metadata")
+
+          ;; Remove reference
+          (let [delta {[:document/id doc-id]
+                       {:document/metadata {:before [:metadata/id meta-id]
+                                            :after nil}}}
+                params {::rad.form/delta delta}]
+
+            (write/save-form! env params)
+
+            ;; Metadata should be deleted due to delete-referent?
+            (is (= 0 (count-metadata ds)) "Metadata should be deleted")
+            (is (nil? (get-metadata ds meta-id))
+                "Metadata should be deleted due to delete-referent?")))))))
+
+(deftest test-one-to-one-delete-referent
+  (testing "delete-referent? deletes orphaned metadata when reference is removed"
+    (with-test-db
+      (fn [ds env]
+        ;; Setup: create document with metadata
+        (let [doc-id (ids/new-uuid)
+              meta-id (ids/new-uuid)]
+          (sql/insert! ds :documents {:id doc-id :title "Doc"})
+          (sql/insert! ds :metadata {:id meta-id :author "Doomed Author" :version 1 :document_id doc-id})
+
+          (is (= 1 (count-metadata ds)) "Should start with 1 metadata")
+          (is (= 1 (count-documents ds)) "Should start with 1 document")
+
+          ;; Remove reference (this should trigger delete due to delete-referent?)
+          (let [delta {[:document/id doc-id]
+                       {:document/metadata {:before [:metadata/id meta-id]
+                                            :after nil}}}
+                params {::rad.form/delta delta}]
+
+            (write/save-form! env params)
+
+            ;; Metadata should be deleted
+            (is (= 0 (count-metadata ds)) "Metadata should be deleted")
+            (is (nil? (get-metadata ds meta-id)) "Metadata should not exist")
+            ;; Document should still exist
+            (is (= 1 (count-documents ds)) "Document should still exist")))))))
+
+(deftest test-one-to-one-change-ref-with-delete-referent
+  (testing "Changing reference (A→B) triggers delete of old referent with delete-referent?"
+    (with-test-db
+      (fn [ds env]
+        ;; Setup: create document with metadata
+        (let [doc-id (ids/new-uuid)
+              old-meta-id (ids/new-uuid)
+              new-meta-id (ids/new-uuid)]
+          (sql/insert! ds :documents {:id doc-id :title "Doc"})
+          (sql/insert! ds :metadata {:id old-meta-id :author "Old" :version 1 :document_id doc-id})
+          (sql/insert! ds :metadata {:id new-meta-id :author "New" :version 2})
+
+          (is (= 2 (count-metadata ds)) "Should start with 2 metadata")
+
+          ;; Change reference from old to new
+          (let [delta {[:document/id doc-id]
+                       {:document/metadata {:before [:metadata/id old-meta-id]
+                                            :after [:metadata/id new-meta-id]}}}
+                params {::rad.form/delta delta}]
+
+            (write/save-form! env params)
+
+            ;; New metadata should have FK to document
+            (let [new-meta (get-metadata ds new-meta-id)]
+              (is (= doc-id (:document_id new-meta))))
+
+            ;; Old metadata should be deleted due to delete-referent?
+            (is (= 1 (count-metadata ds)) "Old metadata should be deleted")
+            (is (nil? (get-metadata ds old-meta-id)) "Old metadata should not exist")
+            (is (some? (get-metadata ds new-meta-id)) "New metadata should exist")))))))
+
+(deftest test-one-to-one-edit-from-child-side
+  (testing "Edit from child side (metadata/document) updates the FK directly"
+    (with-test-db
+      (fn [ds env]
+        ;; Setup: create orphan metadata and document
+        (let [doc-id (ids/new-uuid)
+              meta-id (ids/new-uuid)]
+          (sql/insert! ds :documents {:id doc-id :title "Doc"})
+          (sql/insert! ds :metadata {:id meta-id :author "Author" :version 1})
+
+          ;; Verify metadata has no document_id initially
+          (is (nil? (:document_id (get-metadata ds meta-id))))
+
+          ;; Edit from metadata side - set metadata/document directly
+          ;; This attr has no `ref`, so it stores the FK directly
+          (let [delta {[:metadata/id meta-id]
+                       {:metadata/document {:after [:document/id doc-id]}}}
+                params {::rad.form/delta delta}]
+
+            (write/save-form! env params)
+
+            ;; Verify metadata now has FK to document
+            (let [meta (get-metadata ds meta-id)]
+              (is (= doc-id (:document_id meta))
+                  "Metadata should have FK after direct edit"))))))))
+
+(deftest test-one-to-one-create-both-from-parent
+  (testing "Create document and metadata in single delta, parent-child order"
+    (with-test-db
+      (fn [ds env]
+        (let [doc-tempid (tempid/tempid)
+              meta-tempid (tempid/tempid)
+              ;; Delta with document first (parent)
+              delta {[:document/id doc-tempid]
+                     {:document/title {:after "Parent First"}
+                      :document/metadata {:after [:metadata/id meta-tempid]}}
+                     [:metadata/id meta-tempid]
+                     {:metadata/author {:after "Child"}
+                      :metadata/version {:after 42}}}
+              params {::rad.form/delta delta}
+
+              result (write/save-form! env params)
+
+              doc-id (get (:tempids result) doc-tempid)
+              meta-id (get (:tempids result) meta-tempid)]
+
+          (is (= 2 (count (:tempids result))))
+
+          ;; Verify metadata has FK to document
+          (let [meta (get-metadata ds meta-id)]
+            (is (= "Child" (:author meta)))
+            (is (= 42 (:version meta)))
+            (is (= doc-id (:document_id meta)) "Metadata should have FK to document")))))))

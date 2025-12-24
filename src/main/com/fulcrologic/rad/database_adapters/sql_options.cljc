@@ -35,7 +35,9 @@
    (defattr language-course-course :language-course/course :ref
      {ao/target :course/id
       so/column-name \"course_id\"})    ; The actual FK column
-   ```"
+   ```
+
+   See `delete-orphan?` for important limitations when using these options together."
   :com.fulcrologic.rad.database-adapters.sql/fk-attr)
 
 (def max-length
@@ -141,8 +143,52 @@
    ```
 
    When you remove a domain from the organization's domains list, that domain
-   entity is deleted. The domain has no meaning without its parent organization."
+   entity is deleted. The domain has no meaning without its parent organization.
+
+   ## Important Limitations
+
+   **Single-level only:** delete-orphan? only deletes the immediate orphan. If the
+   orphaned entity has its own children, they are NOT automatically deleted by the
+   application. Use SQL CASCADE constraints (`ON DELETE CASCADE`) on your FK columns
+   to handle nested cleanup.
+
+   **Re-parenting:** To move a child from one parent to another, update the child's
+   FK attribute directly rather than manipulating parent collections. If you remove
+   from ParentA's collection and add to ParentB's collection in the same delta,
+   delete-orphan? will trigger on removal and delete the child before the add.
+
+   Correct re-parenting pattern:
+   ```clojure
+   ;; DO: Update FK directly
+   {[:child/id child-id]
+    {:child/parent {:before [:parent/id parent-a]
+                    :after [:parent/id parent-b]}}}
+
+   ;; DON'T: Manipulate collections (triggers delete-orphan?)
+   {[:parent/id parent-a] {:parent/children {:before [...child...] :after []}}
+    [:parent/id parent-b] {:parent/children {:after [...child...]}}}
+   ```"
   :com.fulcrologic.rad.database-adapters.sql/delete-orphan?)
 
 (def order-by
+  "Attribute option. Specifies the attribute to use for ordering results in to-many
+   collections. Only meaningful on :ref attributes with :many cardinality that also
+   have `fk-attr` set.
+
+   The value should be a qualified keyword of an attribute on the target entity.
+   The generated SQL will include an ORDER BY clause inside the array_agg() function.
+
+   Example:
+   ```clojure
+   (defattr category-children :category/children :ref
+     {ao/cardinality :many
+      ao/target :category/id
+      so/fk-attr :category/parent
+      so/order-by :category/position})  ; Order children by position
+   ```
+
+   Notes:
+   - Uses PostgreSQL's default NULL ordering (NULLs last in ASC)
+   - Duplicate values maintain stable order within the group
+   - Only affects to-many resolvers, not direct queries"
   :com.fulcrologic.rad.database-adapters.sql/order-by)
