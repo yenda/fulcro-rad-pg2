@@ -1,26 +1,16 @@
 (ns com.fulcrologic.rad.database-adapters.sql.resolvers-pathom3
+  "Pathom3 resolvers for pg2 PostgreSQL driver."
   (:require
-   [clojure.set :as set]
    [clojure.string :as str]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.authorization :as auth]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.malli-transform :as mt]
    [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
-   [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
-   [com.fulcrologic.rad.database-adapters.sql.resolvers :as resolvers]
    [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
    [com.wsscode.pathom3.connect.operation :as pco]
-   [honey.sql :as sql]
    [taoensso.encore :as enc]
    [taoensso.timbre :as log]))
-
-(defn reorder-maps-by-id
-  "Reorder target-vec to match the order of order-vec based on id-key.
-   Maps in order-vec without a corresponding entry in target-vec are preserved as-is."
-  [id-key order-vec target-vec]
-  (let [id-map (into {} (map (juxt id-key identity)) target-vec)]
-    (mapv #(get id-map (id-key %) %) order-vec)))
 
 (defn get-column [attribute]
   (let [col (or (::rad.sql/column-name attribute)
@@ -89,36 +79,11 @@
             {id-column id-attr}
             (id-attr->attributes id-attr))))
 
-(defn compile-row-decoder-for-resolver
-  "Compile a Malli-based row decoder for a set of attributes.
-
-   This creates a compiled decoder at resolver generation time that efficiently
-   transforms all columns in a single pass at query time.
-
-   Arguments:
-     column->attr - Map from column keyword to attribute
-
-   Returns:
-     A function (fn [row] transformed-row) that applies SQL->Clojure transformations."
-  [column->attr]
-  (let [attrs (vals column->attr)]
-    (mt/compile-row-decoder attrs
-                            ::attr/qualified-key
-                            (fn [attr] (::rad.sql/column-name attr))
-                            ::attr/type)))
-
 (defn build-pg2-column-config
   "Build the configuration for pg2 zero-copy row transformation.
 
    Maps pg2 column keywords (e.g., :created_at) directly to output paths
-   and types, enabling single-pass transformation.
-
-   Arguments:
-     column-mapping - Vector of [[output-path] column] pairs
-     column->attr   - Map from column keyword to attribute
-
-   Returns:
-     Map like {:created_at {:output-path [:message/created-at] :type :instant}}"
+   and types, enabling single-pass transformation."
   [column-mapping column->attr]
   (reduce
    (fn [acc [output-path column]]
@@ -134,8 +99,6 @@
         column->outputs (get-column->outputs id-attr-k id-attr->attributes k->attr false)
         column-mapping (get-column-mapping column->outputs)
         column->attr (get-column->attr id-attr id-attr->attributes k->attr)
-        ;; Compile the row decoder once at resolver generation time
-        decode-row (compile-row-decoder-for-resolver column->attr)
         ;; pg2 zero-copy: compile transformer that goes directly from pg2 raw -> resolver output
         pg2-column-config (build-pg2-column-config column-mapping column->attr)
         pg2-transform-row (mt/compile-pg2-row-transformer pg2-column-config)
@@ -165,43 +128,17 @@
              ::pco/batch? true
              ::pco/resolve
              (fn [env input]
-               (sql.query/timer
+               (pg2/timer
                 "id-resolver"
                 (let [ids (mapv id-attr-k input)
-                      pool-wrapper (get-in env [::rad.sql/connection-pools schema])
-                      pg2? (= :pg2 (:driver pool-wrapper))
-                      ;; Use pg2 fast path when available
-                      results-by-id
-                      (if pg2?
-                        ;; pg2 prepared statement path: pre-compiled SQL + array param
-                        (let [rows (pg2/pg2-query-prepared! (:pool pool-wrapper)
-                                                            pg2-prepared-sql
-                                                            ids)]
-                          (reduce
-                           (fn [acc row]
-                             (let [result (pg2-transform-row row)]
-                               (assoc acc (id-attr-k result) result)))
-                           {}
-                           rows))
-                        ;; Standard path: HoneySQL + eql-query! + decode + column-mapping
-                        (let [query (sql/format {:select columns
-                                                 :from table
-                                                 :where [:in id-column ids]})
-                              rows (sql.query/eql-query! env query schema input)]
-                          (reduce
-                           (fn [acc row]
-                             (let [decoded-row (decode-row row)
-                                   result (reduce
-                                           (fn [acc [output-path column]]
-                                             (let [value (get decoded-row column)]
-                                               (if (and (nil? value) (= (count output-path) 2))
-                                                 acc
-                                                 (assoc-in acc output-path value))))
-                                           {}
-                                           column-mapping)]
-                               (assoc acc (id-attr-k result) result)))
-                           {}
-                           rows)))
+                      pool (get-in env [::rad.sql/connection-pools schema])
+                      rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                      results-by-id (reduce
+                                     (fn [acc row]
+                                       (let [result (pg2-transform-row row)]
+                                         (assoc acc (id-attr-k result) result)))
+                                     {}
+                                     rows)
                       results (mapv (fn [id] (get results-by-id id)) ids)]
                   (auth/redact env results))
                 {:op-name op-name}))
@@ -211,11 +148,11 @@
 
 (defn to-many-resolvers
   [{::attr/keys [schema]
-    ::rad.sql/keys [ref] ;; user/organization
+    ::rad.sql/keys [ref]
     ::pco/keys [resolve transform] :as attr
-    attr-k ::attr/qualified-key ;; organization/users
-    target-k ::attr/target} ;; user/id
-   id-attr-k ;; organization/id
+    attr-k ::attr/qualified-key
+    target-k ::attr/target}
+   id-attr-k
    id-attr->attributes
    k->attr]
   (when-not resolve
@@ -230,8 +167,7 @@
           table (get-table target-attr)
           ref-attr (or (k->attr ref)
                        (throw (ex-info "Ref attribute not found" attr)))
-          _ (when (= (::attr/cardinality ref-attr)
-                     :many)
+          _ (when (= (::attr/cardinality ref-attr) :many)
               (throw (ex-info "Many to many relations are not implemented" {:target-attr target-attr
                                                                             :ref-attr ref-attr})))
           relationship-column (get-column ref-attr)
@@ -239,9 +175,6 @@
           order-by (some-> (::rad.sql/order-by attr)
                            k->attr
                            get-column)
-          select [[relationship-column :k] [[:array_agg (if order-by
-                                                          [:order-by target-column order-by]
-                                                          target-column)] :v]]
           ;; pg2 prepared statement: pre-compile SQL at resolver generation time
           id-attr (k->attr id-attr-k)
           pg2-prepared-sql (format "SELECT %s AS k, array_agg(%s%s) AS v FROM %s WHERE %s = ANY($1::%s) GROUP BY %s"
@@ -259,21 +192,11 @@
                     ::pco/batch? true
                     ::pco/resolve
                     (fn [env input]
-                      (sql.query/timer
+                      (pg2/timer
                        "to-many-resolver"
                        (let [ids (mapv id-attr-k input)
-                             pool-wrapper (get-in env [::rad.sql/connection-pools schema])
-                             pg2? (= :pg2 (:driver pool-wrapper))
-                             ;; pg2 path: query returns {:k uuid :v [uuid...]} directly
-                             ;; No type transformation needed for UUIDs
-                             rows (if pg2?
-                                    (pg2/pg2-query-prepared! (:pool pool-wrapper) pg2-prepared-sql ids)
-                                    (let [query (sql/format
-                                                 {:select select
-                                                  :from table
-                                                  :where [:in relationship-column ids]
-                                                  :group-by [relationship-column]})]
-                                      (sql.query/eql-query! env query schema input)))
+                             pool (get-in env [::rad.sql/connection-pools schema])
+                             rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
                              results-by-id (reduce (fn [acc {:keys [k v]}]
                                                      (assoc acc k
                                                             {attr-k (mapv (fn [v]
@@ -282,7 +205,6 @@
                                                    {}
                                                    rows)
                              results (mapv #(get results-by-id %) ids)]
-
                          (auth/redact env results))
                        {:op-name op-name}))
                     ::pco/input [id-attr-k]}
@@ -291,10 +213,10 @@
 
 (defn to-one-resolvers [{::attr/keys [schema]
                          ::pco/keys [transform] :as attr
-                         ::rad.sql/keys [ref] ;; question.index-card/question
-                         attr-k ::attr/qualified-key ;; :question/index-card
-                         target-k ::attr/target} ;; question.index-card/id
-                        id-attr-k ;; question/id
+                         ::rad.sql/keys [ref]
+                         attr-k ::attr/qualified-key
+                         target-k ::attr/target}
+                        id-attr-k
                         id-attr->attributes
                         k->attr]
   (if-not ref
@@ -310,8 +232,6 @@
           column->outputs (get-column->outputs target-k id-attr->attributes k->attr true)
           column-mapping (get-column-mapping column->outputs)
           column->attr (get-column->attr target-attr id-attr->attributes k->attr)
-          ;; Compile the row decoder once at resolver generation time
-          decode-row (compile-row-decoder-for-resolver column->attr)
           ;; pg2 zero-copy: compile transformer that goes directly from pg2 raw -> resolver output
           pg2-column-config (build-pg2-column-config column-mapping column->attr)
           pg2-transform-row (mt/compile-pg2-row-transformer pg2-column-config)
@@ -337,42 +257,17 @@
              ::pco/batch? true
              ::pco/resolve
              (fn [env input]
-               (sql.query/timer
+               (pg2/timer
                 "to-one-resolver"
                 (let [ids (mapv id-attr-k input)
-                      pool-wrapper (get-in env [::rad.sql/connection-pools schema])
-                      pg2? (= :pg2 (:driver pool-wrapper))
-                      ;; Transform all SQL values in one pass
-                      results-by-id
-                      (if pg2?
-                        ;; pg2 prepared statement path: pre-compiled SQL + array param
-                        (let [rows (pg2/pg2-query-prepared! (:pool pool-wrapper)
-                                                            pg2-prepared-sql
-                                                            ids)]
-                          (reduce
-                           (fn [acc row]
-                             (let [result (pg2-transform-row row)]
-                               (assoc acc (get-in result [ref id-attr-k]) result)))
-                           {}
-                           rows))
-                        ;; Standard path: HoneySQL + eql-query! + decode + column-mapping
-                        (let [query (sql/format {:select columns
-                                                 :from table
-                                                 :where [:in ref-column ids]})
-                              rows (sql.query/eql-query! env query schema input)]
-                          (reduce
-                           (fn [acc row]
-                             (let [decoded-row (decode-row row)
-                                   result
-                                   (reduce
-                                    (fn [acc [output-path column]]
-                                      (let [value (get decoded-row column)]
-                                        (assoc-in acc output-path value)))
-                                    {}
-                                    column-mapping)]
-                               (assoc acc (get-in result [ref id-attr-k]) result)))
-                           {}
-                           rows)))
+                      pool (get-in env [::rad.sql/connection-pools schema])
+                      rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                      results-by-id (reduce
+                                     (fn [acc row]
+                                       (let [result (pg2-transform-row row)]
+                                         (assoc acc (get-in result [ref id-attr-k]) result)))
+                                     {}
+                                     rows)
                       results (mapv (fn [id]
                                       (when-let [outputs (get results-by-id id)]
                                         (assoc outputs attr-k outputs)))
@@ -396,11 +291,6 @@
                                     (for [entity-id (::attr/identities attribute)]
                                       (assoc attribute ::entity-id (k->attr entity-id)))))
                                  (group-by ::entity-id))
-        ;; id-resolvers are basically a get by id, but they also handle batches, so that
-        ;; one can ask for more than one id in a single query.
-        ;; - we build one id resolver for each id attribute defined
-        ;; - each resolvers grabs all the attributes defined for that particular identity
-        ;; in the select clause.
         _ (log/debug "Generating resolvers for id attributes")
         id-resolvers
         (reduce-kv
@@ -412,8 +302,6 @@
          []
          id-attr->attributes)
 
-        ;; there are two types of target resolvers: one and many
-        ;;
         target-resolvers
         (->> attributes
              (filter #(and
@@ -431,9 +319,5 @@
                                              id-attr-k
                                              id-attr->attributes
                                              k->attr)))))
-             ;; removing the resolvers that were not built.  for
-             ;; instance it could be a manually written one that
-             ;; doesn't need to be generated for a particular to-many
-             ;; relationship
              (remove nil?))]
     (vec (concat id-resolvers target-resolvers))))

@@ -1,17 +1,27 @@
 (ns com.fulcrologic.rad.database-adapters.sql.migration
+  "pg2-based migration runner for PostgreSQL.
+
+   Replaces Flyway with a simpler migration system that:
+   - Tracks applied migrations in a schema_migrations table
+   - Executes SQL files via pg2
+   - Supports auto-schema generation from RAD attributes"
   (:require
+   [clojure.java.io :as io]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
    [com.fulcrologic.guardrails.core :refer [>defn =>]]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
-   [next.jdbc :as jdbc]
+   [pg.core :as pg]
+   [pg.pool :as pg.pool]
    [taoensso.encore :as enc]
-   [taoensso.timbre :as log])
-  (:import (com.zaxxer.hikari HikariDataSource)
-           (org.flywaydb.core Flyway)))
+   [taoensso.timbre :as log]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SQL Type Mapping
 
 (def type-map
   {:string "VARCHAR(2048)"
@@ -40,6 +50,9 @@
            (do
              (log/error "Unsupported type" type)
              "TEXT"))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Schema Operations
 
 (>defn new-table [table]
        [string? => map?]
@@ -148,55 +161,138 @@
              new-refs (mapv op (set ref))]
          (vec (concat new-tables new-ids new-columns new-refs))))
 
-(defn- extract-jdbc-datasource
-  "Extract JDBC datasource from pool wrapper.
-   For pg2 pools, returns nil (pg2 doesn't support JDBC operations like Flyway).
-   For HikariCP pools, returns the HikariDataSource."
-  [pool-or-wrapper]
-  (if (map? pool-or-wrapper)
-    (let [{:keys [driver pool]} pool-or-wrapper]
-      (case driver
-        :pg2 nil  ; pg2 can't be used for JDBC operations
-        pool))    ; HikariCP returns the datasource
-    ;; Backward compatibility: raw datasource
-    pool-or-wrapper))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; pg2-based Migration Runner
 
-(defn migrate! [config all-attributes connection-pools]
+(defn- ensure-migrations-table!
+  "Create the schema_migrations table if it doesn't exist."
+  [conn]
+  (pg/execute conn
+              "CREATE TABLE IF NOT EXISTS schema_migrations (
+                 version VARCHAR(255) PRIMARY KEY,
+                 applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+               )"))
+
+(defn- get-applied-migrations
+  "Get set of already applied migration versions."
+  [conn]
+  (let [rows (pg/execute conn "SELECT version FROM schema_migrations")]
+    (into #{} (map :version) rows)))
+
+(defn- record-migration!
+  "Record that a migration has been applied."
+  [conn version]
+  (pg/execute conn
+              "INSERT INTO schema_migrations (version) VALUES ($1)"
+              {:params [version]}))
+
+(defn- parse-migration-version
+  "Extract version from migration filename (e.g., 'V001__create_users.sql' -> 'V001')."
+  [filename]
+  (when-let [[_ version] (re-matches #"(V\d+)__.*\.sql" filename)]
+    version))
+
+(defn- find-migration-files
+  "Find SQL migration files in the given locations.
+   Locations can be:
+   - classpath:path/to/migrations (searches classpath)
+   - filesystem:/path/to/migrations (searches filesystem)
+   - path/to/migrations (searches classpath by default)"
+  [locations]
+  (mapcat
+   (fn [location]
+     (let [[type path] (if (str/includes? location ":")
+                         (str/split location #":" 2)
+                         ["classpath" location])]
+       (case type
+         "classpath"
+         (when-let [url (io/resource path)]
+           (let [files (->> (io/file url)
+                            file-seq
+                            (filter #(.isFile %))
+                            (filter #(str/ends-with? (.getName %) ".sql")))]
+             (map (fn [f]
+                    {:name (.getName f)
+                     :version (parse-migration-version (.getName f))
+                     :content (slurp f)})
+                  files)))
+
+         "filesystem"
+         (let [dir (io/file path)]
+           (when (.isDirectory dir)
+             (let [files (->> (file-seq dir)
+                              (filter #(.isFile %))
+                              (filter #(str/ends-with? (.getName %) ".sql")))]
+               (map (fn [f]
+                      {:name (.getName f)
+                       :version (parse-migration-version (.getName f))
+                       :content (slurp f)})
+                    files)))))))
+   locations))
+
+(defn- run-migrations!
+  "Run pending migrations in version order."
+  [pool migrations-config]
+  (let [{:keys [locations schema]} migrations-config
+        migrations (->> (find-migration-files locations)
+                        (filter :version)
+                        (sort-by :version))]
+    (pg.pool/with-conn [conn pool]
+      ;; Set search path if schema specified
+      (when (and schema (not= schema "public"))
+        (pg/execute conn (format "SET search_path TO %s, public" schema)))
+
+      (ensure-migrations-table! conn)
+      (let [applied (get-applied-migrations conn)]
+        (doseq [{:keys [name version content]} migrations]
+          (when-not (applied version)
+            (log/info "Applying migration:" name)
+            (pg/with-transaction [tx conn]
+              ;; Execute the migration SQL
+              (pg/execute tx content)
+              ;; Record it as applied
+              (record-migration! tx version))
+            (log/info "Applied migration:" name)))))))
+
+(defn- run-auto-schema!
+  "Auto-create schema from RAD attributes using pg2."
+  [pool schema all-attributes]
+  (let [adapter (vendor/->PostgreSQLAdapter)
+        stmts (automatic-schema schema adapter all-attributes)]
+    (log/info "Automatically trying to create SQL schema from attributes.")
+    (pg.pool/with-conn [conn pool]
+      (doseq [s stmts]
+        (try
+          (pg/execute conn s)
+          (catch Exception e
+            (log/error e s)
+            (throw e)))))))
+
+(defn migrate!
+  "Run migrations for all configured databases.
+
+   Configuration options per database:
+   - :sql/schema - The RAD schema name (keyword)
+   - :sql/auto-create-missing? - Auto-create tables from attributes (boolean)
+   - :migrations/locations - Vector of migration file locations (strings)
+   - :migrations/enabled? - Whether to run migrations (boolean, default true if locations provided)"
+  [config all-attributes connection-pools]
   (let [database-map (some-> config ::rad.sql/databases)]
     (doseq [[dbkey dbconfig] database-map]
-      (let [{:sql/keys [auto-create-missing? schema vendor driver]
-             :flyway/keys [migrate? migrations schema]} dbconfig
-            pool-wrapper (get connection-pools dbkey)
-            ^HikariDataSource jdbc-pool (extract-jdbc-datasource pool-wrapper)]
+      (let [{:sql/keys [auto-create-missing? schema]
+             :migrations/keys [locations enabled?]} dbconfig
+            pool (get connection-pools dbkey)
+            run-migrations? (and (seq locations)
+                                 (not (false? enabled?)))]
         (cond
-          (nil? pool-wrapper)
+          (nil? pool)
           (log/error (str "No pool for " dbkey ". Skipping migrations."))
 
-          (and (= driver :pg2) (or migrate? auto-create-missing?))
-          (log/warn (str "Flyway migrations and auto-create-missing require JDBC. "
-                         "Use a separate HikariCP config for migrations with pg2: " dbkey))
-
-          (and migrate? (seq migrations) jdbc-pool)
+          run-migrations?
           (do
-            (log/info (str "Processing Flyway migrations for " dbkey))
-            (let [flyway (-> (Flyway/configure)
-                             (.dataSource jdbc-pool)
-                             (.locations (into-array String migrations))
-                             (.baselineOnMigrate true)
-                             (.defaultSchema (or schema "public"))
-                             (.load))]
-              (log/info "Migration location is set to: " migrations)
-              (.migrate flyway)))
+            (log/info (str "Running pg2 migrations for " dbkey))
+            (run-migrations! pool {:locations locations
+                                   :schema (or (:migrations/schema dbconfig) "public")}))
 
-          (and auto-create-missing? jdbc-pool)
-          (let [adapter (case vendor
-                          :postgresql (vendor/->PostgreSQLAdapter)
-                          (vendor/->H2Adapter))
-                stmts (automatic-schema schema adapter all-attributes)]
-            (log/info "Automatically trying to create SQL schema from attributes.")
-            (doseq [s stmts]
-              (try
-                (jdbc/execute! jdbc-pool [s])
-                (catch Exception e
-                  (log/error e s)
-                  (throw e))))))))))
+          auto-create-missing?
+          (run-auto-schema! pool schema all-attributes))))))

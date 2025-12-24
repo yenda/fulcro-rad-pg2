@@ -1,4 +1,5 @@
 (ns com.fulcrologic.rad.database-adapters.sql.resolvers
+  "Save/write logic for pg2 PostgreSQL driver."
   (:require
    [clojure.pprint :refer [pprint]]
    [clojure.set :as set]
@@ -14,35 +15,11 @@
    [diehard.core :as dh]
    [edn-query-language.core :as eql]
    [honey.sql :as sql]
-   [next.jdbc :as jdbc]
    [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.timbre :as log])
   (:import
    (org.postgresql.util PSQLException)))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Driver Abstraction
-;;
-;; These functions allow transparent use of either HikariCP/next.jdbc or pg2
-
-(defn- extract-pool
-  "Extract the actual pool/datasource from a pool wrapper.
-   Returns [driver pool] tuple."
-  [pool-or-wrapper]
-  (if (map? pool-or-wrapper)
-    [(:driver pool-or-wrapper) (:pool pool-or-wrapper)]
-    [:hikaricp pool-or-wrapper]))
-
-(defn- execute-sql!
-  "Execute SQL statement with driver dispatch.
-   For reads, returns vector of maps. For writes, returns affected count."
-  [pool-or-wrapper sql-vec]
-  (let [[driver pool] (extract-pool pool-or-wrapper)]
-    (case driver
-      :pg2 (pg2/pg2-query! pool sql-vec)
-      ;; Default: next.jdbc
-      (jdbc/execute! pool sql-vec))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Writes
@@ -73,15 +50,15 @@
                       all-keys)]
     schemas))
 
-(defn- generate-tempids [pool-or-wrapper key->attribute delta]
+(defn- generate-tempids [pool key->attribute delta]
   (reduce
    (fn [result [table id]]
      (if (tempid/tempid? id)
        (let [{::attr/keys [type] :as id-attr} (key->attribute table)
              real-id (if (#{:int :long} type)
-                       (:id (first (execute-sql! pool-or-wrapper
-                                                 [(format "SELECT NEXTVAL('%s') AS id"
-                                                          (sql.schema/sequence-name id-attr))])))
+                       (:id (first (pg2/pg2-query! pool
+                                                   [(format "SELECT NEXTVAL('%s') AS id"
+                                                            (sql.schema/sequence-name id-attr))])))
                        (ids/new-uuid))]
          (assoc result id real-id))
        result))
@@ -121,26 +98,12 @@
     (mt/encode-for-sql type form-value)))
 
 (defn sql->model-value
-  "Transform SQL value to Clojure model value.
-
-   This is the read-path counterpart to form->sql-value. It applies
-   type-specific transformations to convert database values back to
-   their Clojure representations.
-
-   Arguments:
-     attr      - The attribute map containing ::attr/type and optional ::rad.sql/sql->model-value
-     sql-value - The value retrieved from the database
-
-   Returns:
-     The transformed Clojure value."
+  "Transform SQL value to Clojure model value."
   [{::attr/keys [type]
     ::rad.sql/keys [sql->model-value]} sql-value]
   (cond
-    ;; Custom transformer takes precedence
     sql->model-value
     (sql->model-value sql-value)
-
-    ;; Use Malli-based transformation
     :else
     (mt/decode-from-sql type sql-value)))
 
@@ -175,8 +138,8 @@
 (defn delta->scalar-inserts [{::attr/keys [key->attribute]
                               ::rad.sql/keys [connection-pools]
                               :as env} schema delta]
-  (let [ds (get connection-pools schema)
-        tempids (log/spy :trace (generate-tempids ds key->attribute delta))
+  (let [pool (get connection-pools schema)
+        tempids (log/spy :trace (generate-tempids pool key->attribute delta))
         stmts (keep (fn [[ident diff]] (scalar-insert env schema tempids ident diff)) delta)]
     {:tempids tempids
      :insert-scalars stmts}))
@@ -245,8 +208,6 @@
                             :one
                             (if (:after value)
                               (assoc-in acc [(:after value) ref] {:after ident})
-                              ;; if the relation has been removed and the `delete-referent?`
-                              ;; is true the referenced row will be deleted
                               (assoc-in acc [(:before value) ref] {:before ident
                                                                    :after (if delete-referent?
                                                                             :delete
@@ -254,9 +215,6 @@
                             :many
                             (let [after-set (into #{} after)
                                   before-set (into #{} before)]
-
-                              ;; check if a given ref-ident has been added or removed
-                              ;; from the to-many relationship
                               (reduce (fn [acc ref-ident]
                                         (cond
                                           (and (after-set ref-ident)
@@ -269,8 +227,6 @@
                                                     {:before ident
                                                      :after (get-in acc
                                                                     [ref-ident ref :after]
-                                                                    ;; if it has been removed and the `delete-referent?`
-                                                                    ;; is true the referenced row will be deleted
                                                                     (if delete-referent?
                                                                       :delete
                                                                       nil))})
@@ -287,9 +243,7 @@
           delta))
 
 (defn error-condition
-  "Return the error condition from an error by looking up the error code.
-  Add new error code when needed from here:
-  https://www.postgresql.org/docs/12/errcodes-appendix.html"
+  "Return the error condition from an error by looking up the error code."
   [^PSQLException e]
   (case (.getSQLState e)
     "08003" ::connection-does-not-exist
@@ -304,8 +258,7 @@
     ::unknown))
 
 (defn- wrap-save-error
-  "Wrap a PSQLException in an ex-info with structured error data.
-   Preserves the original exception as the cause."
+  "Wrap a PSQLException in an ex-info with structured error data."
   [^PSQLException e]
   (let [condition (error-condition e)]
     (ex-info (str "save-form! failed: " (name condition))
@@ -326,13 +279,7 @@
   "Does all the necessary operations to persist mutations from the
   form delta into the appropriate tables in the appropriate databases.
 
-   Throws ex-info with :type ::save-error for database constraint violations.
-   The ex-data includes:
-     :type      - ::save-error
-     :cause     - keyword like ::string-data-too-long, ::invalid-encoding, etc.
-     :sql-state - PostgreSQL error code
-     :message   - Original error message
-   The original PSQLException is preserved as the cause."
+   Throws ex-info with :type ::save-error for database constraint violations."
   [{::attr/keys [key->attribute]
     ::rad.sql/keys [connection-pools adapters default-adapter]
     :as env} {::rad.form/keys [delta] :as d}]
@@ -344,40 +291,26 @@
       (log/debug "Saving form across " schemas
                  {:delta delta-before
                   :processed-delta (with-out-str (pprint delta))})
-      ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
       (doseq [schema (keys connection-pools)]
         (let [adapter (get adapters schema default-adapter)
-              pool-wrapper (get connection-pools schema)
-              [driver pool] (extract-pool pool-wrapper)
+              pool (get connection-pools schema)
               {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta))
               update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta))
               steps (concat update-scalars insert-scalars)]
           (dh/with-retry
             {:retry-if (fn [_return-value exception-thrown]
-                         (if (and exception-thrown
-                                  (instance? PSQLException exception-thrown)
-                                  (= ::serialization-failure (error-condition exception-thrown)))
-                           true
-                           false))
+                         (and exception-thrown
+                              (instance? PSQLException exception-thrown)
+                              (= ::serialization-failure (error-condition exception-thrown))))
              :max-retries 4
              :backoff-ms [100 200 2.0]}
-            (case driver
-              :pg2
-              (pg.pool/with-conn [conn pool]
-                (pg/with-transaction [tx conn {:isolation-level :serializable}]
-                  (when adapter
-                    (vendor/relax-constraints! adapter tx pg2-execute!))
-                  (doseq [stmt-with-params steps]
-                    (log/debug "save-form!" {:stmt-with-params stmt-with-params})
-                    (pg2-execute! tx stmt-with-params))))
-
-              ;; Default: HikariCP/next.jdbc
-              (jdbc/with-transaction [tx pool {:isolation :serializable}]
+            (pg.pool/with-conn [conn pool]
+              (pg/with-transaction [tx conn {:isolation-level :serializable}]
                 (when adapter
-                  (vendor/relax-constraints! adapter tx))
+                  (vendor/relax-constraints! adapter tx pg2-execute!))
                 (doseq [stmt-with-params steps]
                   (log/debug "save-form!" {:stmt-with-params stmt-with-params})
-                  (jdbc/execute! tx stmt-with-params)))))
+                  (pg2-execute! tx stmt-with-params)))))
           (swap! result update :tempids merge tempids)))
       @result)
     (catch PSQLException e

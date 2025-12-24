@@ -133,6 +133,23 @@
   (pool/close pool))
 
 ;; =============================================================================
+;; Performance Logging
+;; =============================================================================
+
+(defmacro timer
+  "Log query execution time. Warns if query takes > 1 second."
+  [s expr params]
+  `(let [start# (. System (nanoTime))
+         _# (log/debug (format "Running %s" ~s) ~params)
+         ret# ~expr
+         duration# (/ (double (- (. System (nanoTime)) start#))
+                      1000000.0)]
+     (if (< 1000 duration#)
+       (log/warn (format "Ran %s in %f msecs" ~s duration#) ~params)
+       (log/debug (format "Ran %s in %f msecs" ~s duration#) ~params))
+     ret#))
+
+;; =============================================================================
 ;; Query Execution
 ;; =============================================================================
 
