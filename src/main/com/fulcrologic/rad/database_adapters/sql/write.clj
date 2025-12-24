@@ -82,28 +82,32 @@
      (reduce
       (fn [acc [attr-k {:keys [before after]}]]
         (let [{::attr/keys [_type cardinality]
-               ::rad.sql/keys [ref delete-referent?]} (key->attribute attr-k)]
-          (if (and ref (not (= before after nil)))
+               ::rad.sql/keys [fk-attr delete-orphan?]} (key->attribute attr-k)]
+          (if (and fk-attr (not (= before after nil)))
             (case cardinality
               :one
-              (if after
-                (assoc-in acc [after ref] {:after ident})
-                (assoc-in acc [before ref] {:before ident
-                                            :after (when delete-referent? :delete)}))
+              (cond-> acc
+                ;; Set new reference's FK
+                after
+                (assoc-in [after fk-attr] {:after ident})
+                ;; Clear/delete old reference if it exists and is different from new
+                (and before (not= before after))
+                (assoc-in [before fk-attr] {:before ident
+                                            :after (when delete-orphan? :delete)}))
               :many
               (let [after-set (set after)
                     before-set (set before)]
                 (reduce
-                 (fn [acc ref-ident]
+                 (fn [acc fk-ident]
                    (cond
-                     (and (after-set ref-ident) (not (before-set ref-ident)))
-                     (assoc-in acc [ref-ident ref] {:after ident})
+                     (and (after-set fk-ident) (not (before-set fk-ident)))
+                     (assoc-in acc [fk-ident fk-attr] {:after ident})
 
-                     (and (before-set ref-ident) (not (after-set ref-ident)))
-                     (assoc-in acc [ref-ident ref]
+                     (and (before-set fk-ident) (not (after-set fk-ident)))
+                     (assoc-in acc [fk-ident fk-attr]
                                {:before ident
-                                :after (get-in acc [ref-ident ref :after]
-                                               (when delete-referent? :delete))})
+                                :after (get-in acc [fk-ident fk-attr :after]
+                                               (when delete-orphan? :delete))})
 
                      :else acc))
                  acc
@@ -151,7 +155,7 @@
     (when (= schema target-schema)
       (cond
         (and (= cardinality :many) (= :ref type)) nil
-        (= cardinality :one) (when-not (::rad.sql/ref attr) attr)
+        (= cardinality :one) (when-not (::rad.sql/fk-attr attr) attr)
         :else attr))))
 
 (defn generate-insert

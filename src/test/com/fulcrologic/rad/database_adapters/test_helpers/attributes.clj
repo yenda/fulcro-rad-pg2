@@ -49,7 +49,7 @@
    ::rad.attr/target :address/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:account/id}
-   ::rad.sql/ref :address/account})
+   ::rad.sql/fk-attr :address/account})
 
 ;; Derived data (no schema - not persisted)
 (defattr account-locked? :account/locked? :boolean
@@ -211,7 +211,7 @@
    ::rad.attr/target :category/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:category/id}
-   ::rad.sql/ref :category/parent
+   ::rad.sql/fk-attr :category/parent
    ::rad.sql/order-by :category/name})
 
 ;; Position for ordering
@@ -223,7 +223,12 @@
   [category-id category-name category-parent category-children category-position])
 
 ;; =============================================================================
-;; Document - demonstrates owns-ref? and delete-referent?
+;; Document / Metadata - demonstrates one-to-one with delete-referent?
+;;
+;; Pattern: Metadata owns the FK (metadata.document_id column)
+;; - document/metadata has `ref` pointing to metadata's FK attr
+;; - document/metadata has `delete-referent?` (orphaned metadata gets deleted)
+;; - metadata/document stores the FK directly (no `ref`)
 ;; =============================================================================
 
 (defattr document-id :document/id :uuid
@@ -235,19 +240,20 @@
   {::rad.attr/schema :production
    ::rad.attr/identities #{:document/id}})
 
-;; One-to-one with owned metadata (delete-referent? simulates isComponent)
+;; One-to-one ref to metadata. The FK is stored on metadata's side.
+;; When this reference is removed/changed, delete the orphaned metadata.
 (defattr document-metadata :document/metadata :ref
   {::rad.attr/cardinality :one
    ::rad.attr/target :metadata/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:document/id}
-   ::rad.sql/owns-ref? true
-   ::rad.sql/delete-referent? true})
+   ::rad.sql/fk-attr :metadata/document    ; FK is stored by :metadata/document
+   ::rad.sql/delete-orphan? true})        ; Delete orphaned metadata
 
 (def document-attributes [document-id document-title document-metadata])
 
 ;; =============================================================================
-;; Metadata - owned by document
+;; Metadata - child entity owned by document
 ;; =============================================================================
 
 (defattr metadata-id :metadata/id :uuid
@@ -263,13 +269,13 @@
   {::rad.attr/schema :production
    ::rad.attr/identities #{:metadata/id}})
 
-;; Reverse ref back to document
+;; FK to document - this attr stores the actual FK column (metadata.document_id)
 (defattr metadata-document :metadata/document :ref
   {::rad.attr/cardinality :one
    ::rad.attr/target :document/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:metadata/id}
-   ::rad.sql/ref :document/metadata})
+   ::rad.sql/column-name "document_id"})  ; Explicit FK column, no `ref`
 
 (def metadata-attributes [metadata-id metadata-author metadata-version metadata-document])
 

@@ -1,6 +1,5 @@
 (ns com.fulcrologic.rad.database-adapters.sql-options
-  "Options supported by the SQL adapter"
-  (:refer-clojure :exclude [ref]))
+  "Options supported by the SQL adapter")
 
 (def table
   "Attribute option. The name of the database table. Use on `ao/identity? true` attributes.
@@ -12,15 +11,32 @@
   the snake_case name of the attribute."
   :com.fulcrologic.rad.database-adapters.sql/column-name)
 
-(def owns-ref?
-  "Attribute option. Required in one-to-one relationship to establish
-  on which side references the other. It can be both."
-  :com.fulcrologic.rad.database-adapters.sql/owns-ref?)
+(def fk-attr
+  "Which attribute has the foreign key?
 
-(def ref
-  "Attribute option. Required in one-to-one relationship to establish
-  on which side references the other. It can be both."
-  :com.fulcrologic.rad.database-adapters.sql/ref)
+   Attribute option. Indicates this is a reverse/virtual reference.
+
+   The value is the qualified keyword of the attribute that stores the actual FK.
+   When this attribute is modified, changes are propagated to the FK-owning attribute.
+
+   FK ownership rules:
+   - Attribute WITHOUT `fk-attr` -> stores FK directly in its table
+   - Attribute WITH `fk-attr` -> reverse lookup, FK is stored by the referenced attr
+
+   Example (one-to-one, child owns FK):
+   ```clojure
+   ;; Parent side - virtual ref, FK is stored by :language-course/course
+   (defattr course-language-course :course/language-course :ref
+     {ao/target :language-course/id
+      so/fk-attr :language-course/course   ; Points to FK-owning attr
+      so/delete-orphan? true})             ; Works because this attr has `fk-attr`
+
+   ;; Child side - owns the FK (no `fk-attr`)
+   (defattr language-course-course :language-course/course :ref
+     {ao/target :course/id
+      so/column-name \"course_id\"})    ; The actual FK column
+   ```"
+  :com.fulcrologic.rad.database-adapters.sql/fk-attr)
 
 (def max-length
   "Attribute option. The max length for attributes that are internally represented by strings. This
@@ -99,14 +115,34 @@
    "
   :com.fulcrologic.rad.database-adapters.sql/databases)
 
-(def delete-referent?
-  "Attribute option. Only has meaning for :ref types (both cardinalities). When an
-  existing reference is changed to point to a new thing, if this option is true then the thing that is no longer
-   referred to will be deleted. This allows for the basic simulation of Datomic's
-   isComponent flag.  This is different than SQL CASCADE, because in this case nothing
-   has been deleted. The reference on which this option lives is just being changed
-   to point to a different thing."
-  :com.fulcrologic.rad.database-adapters.sql/delete-referent?)
+(def delete-orphan?
+  "Should orphans be deleted?
+
+   Attribute option. Only has meaning for :ref types (both cardinalities) that also
+   have the `fk-attr` option set.
+
+   Semantic meaning: 'This child entity has no meaning as an orphan. If I stop
+   referencing it, delete it.'
+
+   When a reference is REMOVED (set to nil or removed from a collection), if this
+   option is true, the entity that was being referenced will be deleted.
+
+   This is different from SQL CASCADE:
+   - CASCADE: Deletes children when PARENT is deleted
+   - delete-orphan?: Deletes child when REFERENCE is removed (parent still exists)
+
+   Example:
+   ```clojure
+   (defattr domains :organization/domains :ref
+     {ao/target :organization.domain/id
+      ao/cardinality :many
+      so/fk-attr :organization.domain/organization
+      so/delete-orphan? true})
+   ```
+
+   When you remove a domain from the organization's domains list, that domain
+   entity is deleted. The domain has no meaning without its parent organization."
+  :com.fulcrologic.rad.database-adapters.sql/delete-orphan?)
 
 (def order-by
   :com.fulcrologic.rad.database-adapters.sql/order-by)

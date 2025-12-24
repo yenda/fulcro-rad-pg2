@@ -233,28 +233,28 @@
 (defn build-to-many-resolver-config
   "Build all configuration needed for a to-many resolver at generation time.
    Returns a map with :sql, :wrap-targets, :outputs, :op-name, :schema, or nil if invalid."
-  [{::rad.sql/keys [ref order-by]
+  [{::rad.sql/keys [fk-attr order-by]
     ::pco/keys [resolve transform]
     attr-k ::attr/qualified-key
     target-k ::attr/target}
    id-attr-k
    k->attr]
   (when-not resolve
-    (when-not ref
-      (throw (ex-info (str "Missing ::rad.sql/ref for to-many attribute " attr-k)
-                      {:attr-key attr-k :type :missing-ref})))
+    (when-not fk-attr
+      (throw (ex-info (str "Missing ::rad.sql/fk-attr for to-many attribute " attr-k)
+                      {:attr-key attr-k :type :missing-fk-attr})))
     (let [target-attr (or (k->attr target-k)
                           (throw (ex-info (str "Target attribute " target-k " not found for " attr-k)
                                           {:attr-key attr-k :target target-k :type :missing-target})))
-          ref-attr (or (k->attr ref)
-                       (throw (ex-info (str "Ref attribute " ref " not found for " attr-k)
-                                       {:attr-key attr-k :ref ref :type :missing-ref-attr})))
-          _ (when (= (::attr/cardinality ref-attr) :many)
+          fk-attr-def (or (k->attr fk-attr)
+                          (throw (ex-info (str "FK attribute " fk-attr " not found for " attr-k)
+                                          {:attr-key attr-k :fk-attr fk-attr :type :missing-fk-attr-def})))
+          _ (when (= (::attr/cardinality fk-attr-def) :many)
               (throw (ex-info "Many to many relations are not implemented"
-                              {:attr-key attr-k :target-attr target-k :ref-attr ref :type :unsupported})))
+                              {:attr-key attr-k :target-attr target-k :fk-attr fk-attr :type :unsupported})))
           id-attr (k->attr id-attr-k)]
       {:sql (build-array-agg-sql
-             (get-column ref-attr)
+             (get-column fk-attr-def)
              (get-column target-attr)
              (get-table target-attr)
              (get-pg-array-type id-attr)
@@ -353,18 +353,18 @@
 (defn to-one-resolver
   "Generate a resolver for to-one references.
    Two cases:
-   1. Forward ref (no ::rad.sql/ref): Source table has FK column, use alias resolver
-   2. Reverse ref (has ::rad.sql/ref): Target table has FK, generate batch resolver"
-  [{::rad.sql/keys [ref] attr-k ::attr/qualified-key target-k ::attr/target :as attribute}
+   1. Forward ref (no ::rad.sql/fk-attr): Source table has FK column, use alias resolver
+   2. Reverse ref (has ::rad.sql/fk-attr): Target table has FK, generate batch resolver"
+  [{::rad.sql/keys [fk-attr] attr-k ::attr/qualified-key target-k ::attr/target :as attribute}
    id-attr-k
    id-attr->attributes
    k->attr]
-  (if-not ref
+  (if-not fk-attr
     ;; Forward ref: alias to reuse the id-resolver of the target entity
     (pbir/alias-resolver (to-one-keyword attr-k) target-k)
     ;; Reverse ref: generate batch resolver
     (let [{:keys [sql ref-column transform-row full-outputs op-name id-attr-k attr-k schema transform]}
-          (build-to-one-resolver-config attribute id-attr-k id-attr->attributes k->attr ref)]
+          (build-to-one-resolver-config attribute id-attr-k id-attr->attributes k->attr fk-attr)]
       (pco/resolver
        op-name
        (cond->

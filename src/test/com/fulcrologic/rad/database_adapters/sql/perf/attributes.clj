@@ -9,7 +9,7 @@
    - To-many refs (Org->Depts, Dept->Employees, Project->Tasks)
    - Self-references (Employee->Manager, Task->ParentTask)
    - Shared entities (Address used by Org and Employee)
-   - Reverse refs via ::rad.sql/ref"
+   - Reverse refs via ::rad.sql/fk-attr"
   (:require
    [com.fulcrologic.rad.attributes :as attr :refer [defattr]]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]))
@@ -122,7 +122,7 @@
    ::attr/target :department/id
    ::attr/schema :perf
    ::attr/identities #{:organization/id}
-   ::rad.sql/ref :department/organization})
+   ::rad.sql/fk-attr :department/organization})
 
 (def organization-attributes
   [org-id org-name org-founded org-active org-employee-count
@@ -175,7 +175,7 @@
    ::attr/target :employee/id
    ::attr/schema :perf
    ::attr/identities #{:department/id}
-   ::rad.sql/ref :employee/department})
+   ::rad.sql/fk-attr :employee/department})
 
 ;; To-many: Department -> Projects (via reverse ref)
 (defattr dept-projects :department/projects :ref
@@ -183,7 +183,7 @@
    ::attr/target :project/id
    ::attr/schema :perf
    ::attr/identities #{:department/id}
-   ::rad.sql/ref :project/department})
+   ::rad.sql/fk-attr :project/department})
 
 (def department-attributes
   [dept-id dept-name dept-code dept-budget dept-active
@@ -253,7 +253,7 @@
    ::attr/target :employee/id
    ::attr/schema :perf
    ::attr/identities #{:employee/id}
-   ::rad.sql/ref :employee/manager})
+   ::rad.sql/fk-attr :employee/manager})
 
 ;; To-one: Employee -> Address (home)
 (defattr emp-home-address :employee/home-address :ref
@@ -269,7 +269,7 @@
    ::attr/target :skill/id
    ::attr/schema :perf
    ::attr/identities #{:employee/id}
-   ::rad.sql/ref :employee-skill/employee})
+   ::rad.sql/fk-attr :employee-skill/employee})
 
 ;; To-many: Employee -> Tasks (assigned tasks via reverse ref)
 (defattr emp-assigned-tasks :employee/assigned-tasks :ref
@@ -277,7 +277,7 @@
    ::attr/target :task/id
    ::attr/schema :perf
    ::attr/identities #{:employee/id}
-   ::rad.sql/ref :task/assignee})
+   ::rad.sql/fk-attr :task/assignee})
 
 (def employee-attributes
   [emp-id emp-first-name emp-last-name emp-email emp-hire-date
@@ -374,7 +374,7 @@
    ::attr/target :task/id
    ::attr/schema :perf
    ::attr/identities #{:project/id}
-   ::rad.sql/ref :task/project})
+   ::rad.sql/fk-attr :task/project})
 
 (def project-attributes
   [proj-id proj-name proj-description proj-start-date proj-end-date
@@ -454,7 +454,7 @@
    ::attr/target :task/id
    ::attr/schema :perf
    ::attr/identities #{:task/id}
-   ::rad.sql/ref :task/parent})
+   ::rad.sql/fk-attr :task/parent})
 
 (def task-attributes
   [task-id task-title task-description task-priority task-status
