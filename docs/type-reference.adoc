@@ -129,17 +129,13 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
 |Sets the VARCHAR length for string-based types
 |`:string`, `:password`, `:keyword`, `:symbol`, `:enum`
 
-|`::sql/owns-ref?`
-|Indicates the FK column is stored on this entity's table (for one-to-one relationships)
-|To-one `:ref` attributes
+|`::sql/fk-attr`
+|Specifies which attribute owns the FK (for reverse/virtual references where FK is on target table)
+|`:ref` attributes (both cardinalities)
 
-|`::sql/ref`
-|Specifies the reverse FK attribute (FK is on the target table)
-|To-many `:ref` attributes
-
-|`::sql/delete-referent?`
-|When a reference changes, delete the orphaned entity (simulates Datomic's `isComponent`)
-|`:ref` attributes
+|`::sql/delete-orphan?`
+|When a reference is removed, delete the orphaned entity. Only valid with `fk-attr`.
+|`:ref` attributes with `fk-attr`
 
 |`::sql/order-by`
 |Default ordering for to-many relationships
@@ -188,7 +184,7 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
    ::attr/target :line-item/id
    ::attr/schema :production
    ::attr/identities #{:order/id}
-   ::sql/ref :line-item/order})  ; Points to reverse ref attribute
+   ::sql/fk-attr :line-item/order})  ; FK is stored by :line-item/order
 
 ;; Owned component (deleted when parent reference changes)
 (defattr document-metadata :document/metadata :ref
@@ -196,8 +192,8 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
    ::attr/target :metadata/id
    ::attr/schema :production
    ::attr/identities #{:document/id}
-   ::sql/owns-ref? true
-   ::sql/delete-referent? true})
+   ::sql/fk-attr :metadata/document   ; FK stored by :metadata/document
+   ::sql/delete-orphan? true})        ; Delete orphaned metadata
 ----
 
 ==== Value Transformers
@@ -241,15 +237,15 @@ The test suite includes comprehensive coverage of all types and options through 
 
 |Category
 |`:uuid`, `:string`, `:int`, `:ref` (self-referential)
-|`table`, `ref`, `order-by`
+|`table`, `fk-attr`, `order-by`
 
 |Document
 |`:uuid`, `:string`, `:ref`
-|`table`, `owns-ref?`, `delete-referent?`
+|`table`, `fk-attr`, `delete-orphan?`
 
 |Metadata
 |`:uuid`, `:string`, `:int`, `:ref`
-|`table`, `ref`
+|`table`
 |===
 
 == Generative Test Generators

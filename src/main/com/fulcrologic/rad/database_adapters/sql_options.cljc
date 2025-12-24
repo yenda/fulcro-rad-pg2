@@ -93,26 +93,26 @@
    The values in each database config can include any keys you want, but there are some
    predefined ones used by the built-in adapter:
 
-   * `:flyway/migrate?` - Indicate that you'd like to use Flyway to run migrations.
-   * `:flyway/migrations` - A vector of Flyway migration locations. See their docs.
-   * `:hikaricp/config` - A map that will be converted to properties to pass to a Hikari connection pool.
+   * `:pg2/config` - pg2 connection config (host, port, user, password, database)
+   * `:pg2/pool` - pg2 pool options (pool-min-size, pool-max-size)
    * `:sql/auto-create-missing?` - When true, the adapter will try to generate schema for
      defined but missing attributes. NOT recommended for production use.
-   *  `:sql/schema` - The RAD schema (you define) that this database should use. Any attribute
-   with a declared `ao/schema` that matches this should appear in the schema of this database.
+   * `:sql/schema` - The RAD schema (you define) that this database should use. Any attribute
+     with a declared `ao/schema` that matches this should appear in the schema of this database.
 
    For example:
 
    ```
    :com.fulcrologic.rad.database-adapters.sql/databases
-     {:main {:flyway/migrate?          true
-       :flyway/migrations        [\"classpath:config/sql_migrations\"]
-       :hikaricp/config          {\"dataSourceClassName\"     \"org.postgresql.ds.PGSimpleDataSource\"
-                                  \"dataSource.serverName\"   \"localhost\"
-                                  \"dataSource.user\"         \"grp\"
-                                  \"dataSource.databaseName\" \"grp\"}
-       :sql/auto-create-missing? false
-       :sql/schema               :production}}
+     {:main {:pg2/config {:host \"localhost\"
+                          :port 5432
+                          :user \"myuser\"
+                          :password \"mypassword\"
+                          :database \"mydb\"}
+             :pg2/pool {:pool-min-size 2
+                        :pool-max-size 10}
+             :sql/auto-create-missing? false
+             :sql/schema :production}}
    ```
    "
   :com.fulcrologic.rad.database-adapters.sql/databases)

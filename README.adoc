@@ -55,44 +55,29 @@ The configuration options for the SQL adapter look like this:
 [source]
 -----
  :com.fulcrologic.rad.database-adapters.sql/databases
-                                    {:main {:flyway/migrate?          false
-                                            :flyway/migrations        ["classpath:config/sql_migrations"]
-                                            :sql/auto-create-missing? true
-                                            :sql/schema               :production}}
-
+   {:main {:pg2/config {:host "localhost"
+                        :port 5432
+                        :user "myuser"
+                        :password "mypassword"
+                        :database "mydb"}
+           :pg2/pool {:pool-min-size 2
+                      :pool-max-size 10}
+           :sql/auto-create-missing? true
+           :sql/schema :production}}
 -----
 
 === Schema Generation
 
-Automatic schema is quite nice for early development work, and is enabled with the auto-create-missing flag.
+Automatic schema is quite nice for early development work, and is enabled with the `auto-create-missing?` flag.
 
 Each database should be given an (invented) schema name, which will match the schema you set on (some or all) attributes.
 
 The automatic schema generation just tries to generate columns in tables if (and only if) they do not already exist.
 This is reasonable for really fast startup of a project, but is almost certainly insufficient for real projects.
 
-As such this plugin includes functions that can leverage Flyway to execute migrations.
-
-=== Using Flyway
-
-The flyway options turn on/off (and locate) migration files. Use that if you want to manually create schema via
-Flyway files.
-
-See the Flyway documentation for specific details, but the bases are as follows:
-
-1. Create migrations with names like `Vx.y.z__description.sql` in
-`config/sql_migrations` (on the CLASSPATH).
-2. Include the following in your application configuration:
-
-[source,clojure]
------
-...
- :com.fulcrologic.rad.database-adapters.sql/databases
-   {:main {:flyway/migrate?          true
-           :flyway/migrations        ["classpath:config/sql_migrations"]
-           ...}}
-...
------
+For production use, manage your schema with a migration tool of your choice (e.g., Flyway, Migratus, or plain SQL scripts).
+The `com.fulcrologic.rad.database-adapters.sql.migration/automatic-schema` function can generate DDL statements
+that you can use as a starting point for your migrations
 
 == Attributes
 

@@ -222,7 +222,7 @@ The Datomic adapter supports more types than the SQL adapter:
 |Native `:db/isComponent` with automatic cascade deletion
 
 |SQL
-|Manual via `::sql/delete-referent?` option
+|Manual via `::sql/delete-orphan?` option (requires `::sql/fk-attr`)
 |===
 
 ==== Reference Handling
