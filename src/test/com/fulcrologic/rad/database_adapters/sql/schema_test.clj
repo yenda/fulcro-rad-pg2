@@ -1,5 +1,6 @@
 (ns com.fulcrologic.rad.database-adapters.sql.schema-test
-  "Tests for schema.clj - table/column name derivation from RAD attributes."
+  "Tests for schema.clj - table/column name derivation from RAD attributes.
+   Also tests migration.clj sql-type function for max-length option."
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
@@ -8,6 +9,7 @@
    [clojure.test.check.properties :as prop]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
    [com.fulcrologic.rad.database-adapters.sql.schema :as schema]
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [taoensso.encore :as enc]))
@@ -263,3 +265,114 @@
                             ::rad.sql/column-name explicit-col}
                       result (schema/column-name attr)]
                   (= explicit-col result))))
+
+;; =============================================================================
+;; Unit Tests - sql-type and max-length
+;; =============================================================================
+
+(deftest sql-type-respects-max-length
+  (testing "sql-type uses max-length for :string type"
+    (let [attr-100 {::attr/qualified-key :test/name
+                    ::attr/type :string
+                    ::rad.sql/max-length 100}
+          attr-500 {::attr/qualified-key :test/desc
+                    ::attr/type :string
+                    ::rad.sql/max-length 500}
+          attr-no-max {::attr/qualified-key :test/other
+                       ::attr/type :string}]
+      (is (= "VARCHAR(100)" (mig/sql-type attr-100)))
+      (is (= "VARCHAR(500)" (mig/sql-type attr-500)))
+      (is (= "VARCHAR(200)" (mig/sql-type attr-no-max))
+          "Without max-length, should default to VARCHAR(200)")))
+
+  (testing "sql-type uses max-length for :password type"
+    (let [attr-256 {::attr/qualified-key :test/secret
+                    ::attr/type :password
+                    ::rad.sql/max-length 256}
+          attr-no-max {::attr/qualified-key :test/pass
+                       ::attr/type :password}]
+      (is (= "VARCHAR(256)" (mig/sql-type attr-256)))
+      (is (= "VARCHAR(200)" (mig/sql-type attr-no-max)))))
+
+  (testing "sql-type uses max-length for :keyword type"
+    (let [attr-50 {::attr/qualified-key :test/status
+                   ::attr/type :keyword
+                   ::rad.sql/max-length 50}
+          attr-no-max {::attr/qualified-key :test/category
+                       ::attr/type :keyword}]
+      (is (= "VARCHAR(50)" (mig/sql-type attr-50)))
+      (is (= "VARCHAR(200)" (mig/sql-type attr-no-max)))))
+
+  (testing "sql-type uses max-length for :symbol type"
+    (let [attr-75 {::attr/qualified-key :test/sym
+                   ::attr/type :symbol
+                   ::rad.sql/max-length 75}
+          attr-no-max {::attr/qualified-key :test/sym2
+                       ::attr/type :symbol}]
+      (is (= "VARCHAR(75)" (mig/sql-type attr-75)))
+      (is (= "VARCHAR(200)" (mig/sql-type attr-no-max)))))
+
+  (testing "sql-type ignores max-length for non-string types"
+    (let [int-attr {::attr/qualified-key :test/count
+                    ::attr/type :int
+                    ::rad.sql/max-length 100}
+          uuid-attr {::attr/qualified-key :test/id
+                     ::attr/type :uuid
+                     ::rad.sql/max-length 100}
+          bool-attr {::attr/qualified-key :test/active
+                     ::attr/type :boolean
+                     ::rad.sql/max-length 100}
+          decimal-attr {::attr/qualified-key :test/price
+                        ::attr/type :decimal
+                        ::rad.sql/max-length 100}
+          instant-attr {::attr/qualified-key :test/created
+                        ::attr/type :instant
+                        ::rad.sql/max-length 100}]
+      (is (= "INTEGER" (mig/sql-type int-attr)))
+      (is (= "UUID" (mig/sql-type uuid-attr)))
+      (is (= "BOOLEAN" (mig/sql-type bool-attr)))
+      (is (= "decimal(20,2)" (mig/sql-type decimal-attr)))
+      (is (= "TIMESTAMP WITH TIME ZONE" (mig/sql-type instant-attr))))))
+
+(deftest sql-type-enum-uses-fixed-length
+  (testing ":enum type uses fixed VARCHAR(200) regardless of max-length"
+    ;; Note: enum intentionally doesn't use max-length per migration.clj comment
+    ;; "There is no standard SQL enum, and many ppl think they are a bad idea"
+    (let [attr {::attr/qualified-key :test/state
+                ::attr/type :enum}]
+      (is (= "VARCHAR(200)" (mig/sql-type attr))))))
+
+(deftest sql-type-long-type
+  (testing ":long type maps to BIGINT"
+    (let [attr {::attr/qualified-key :test/big-number
+                ::attr/type :long}]
+      (is (= "BIGINT" (mig/sql-type attr))))))
+
+;; =============================================================================
+;; Generative Tests - max-length
+;; =============================================================================
+
+(def gen-max-length
+  "Generator for valid max-length values (positive integers)"
+  (gen/such-that pos? (gen/choose 1 10000)))
+
+(defspec max-length-string-types-use-custom-length 50
+  (prop/for-all [max-len gen-max-length
+                 type (gen/elements [:string :password :keyword :symbol])]
+                (let [attr {::attr/qualified-key :test/attr
+                            ::attr/type type
+                            ::rad.sql/max-length max-len}
+                      result (mig/sql-type attr)]
+                  (= (str "VARCHAR(" max-len ")") result))))
+
+(defspec max-length-ignored-for-non-string-types 30
+  (prop/for-all [max-len gen-max-length
+                 type (gen/elements [:int :long :boolean :uuid :decimal :instant])]
+                (let [attr-with-max {::attr/qualified-key :test/attr
+                                     ::attr/type type
+                                     ::rad.sql/max-length max-len}
+                      attr-without-max {::attr/qualified-key :test/attr
+                                        ::attr/type type}]
+                  ;; max-length should have no effect on non-string types
+                  (= (mig/sql-type attr-with-max)
+                     (mig/sql-type attr-without-max)))))
