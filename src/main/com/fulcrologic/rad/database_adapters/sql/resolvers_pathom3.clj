@@ -5,7 +5,10 @@
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.authorization :as auth]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.malli-transform :as mt]
+   [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.fulcrologic.rad.database-adapters.sql.query :as sql.query]
+   [com.fulcrologic.rad.database-adapters.sql.resolvers :as resolvers]
    [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
    [com.wsscode.pathom3.connect.operation :as pco]
    [honey.sql :as sql]
@@ -65,10 +68,65 @@
              []
              column->outputs))
 
+(defn get-column->attr
+  "Build a mapping from column keyword to attribute for value transformation."
+  [id-attr id-attr->attributes k->attr]
+  (let [id-column (get-column id-attr)]
+    (reduce (fn [acc attr]
+              (assoc acc (get-column attr) attr))
+            {id-column id-attr}
+            (id-attr->attributes id-attr))))
+
+(defn compile-row-decoder-for-resolver
+  "Compile a Malli-based row decoder for a set of attributes.
+
+   This creates a compiled decoder at resolver generation time that efficiently
+   transforms all columns in a single pass at query time.
+
+   Arguments:
+     column->attr - Map from column keyword to attribute
+
+   Returns:
+     A function (fn [row] transformed-row) that applies SQL->Clojure transformations."
+  [column->attr]
+  (let [attrs (vals column->attr)]
+    (mt/compile-row-decoder attrs
+                            ::attr/qualified-key
+                            (fn [attr] (::rad.sql/column-name attr))
+                            ::attr/type)))
+
+(defn build-pg2-column-config
+  "Build the configuration for pg2 zero-copy row transformation.
+
+   Maps pg2 column keywords (e.g., :created_at) directly to output paths
+   and types, enabling single-pass transformation.
+
+   Arguments:
+     column-mapping - Vector of [[output-path] column] pairs
+     column->attr   - Map from column keyword to attribute
+
+   Returns:
+     Map like {:created_at {:output-path [:message/created-at] :type :instant}}"
+  [column-mapping column->attr]
+  (reduce
+   (fn [acc [output-path column]]
+     (let [attr (get column->attr column)
+           attr-type (when attr (::attr/type attr))]
+       (assoc acc column {:output-path output-path
+                          :type attr-type})))
+   {}
+   column-mapping))
+
 (defn id-resolver [{::attr/keys [id-attr id-attr->attributes attributes k->attr] :as c}]
   (let [id-attr-k (::attr/qualified-key id-attr)
         column->outputs (get-column->outputs id-attr-k id-attr->attributes k->attr false)
         column-mapping (get-column-mapping column->outputs)
+        column->attr (get-column->attr id-attr id-attr->attributes k->attr)
+        ;; Compile the row decoder once at resolver generation time
+        decode-row (compile-row-decoder-for-resolver column->attr)
+        ;; pg2 zero-copy: compile transformer that goes directly from pg2 raw -> resolver output
+        pg2-column-config (build-pg2-column-config column-mapping column->attr)
+        pg2-transform-row (mt/compile-pg2-row-transformer pg2-column-config)
         outputs (vec (flatten (vals column->outputs)))
         columns (keys column->outputs)
         table (get-table id-attr)
@@ -94,32 +152,37 @@
                       query (sql/format {:select columns
                                          :from table
                                          :where [:in id-column ids]})
-                      rows (sql.query/eql-query! env
-                                                 query
-                                                 schema
-                                                 input)
-                      results-by-id (reduce
-                                     (fn [acc row]
-                                       (let [result
-                                             (reduce
-                                              (fn [acc [output-path column]]
-                                                (let [value (get row column)]
-                                                  ;; if ref we don't return it
-                                                  (if (and (nil? value) (= (count output-path) 2))
-                                                    acc
-                                                    (assoc-in acc output-path value))))
-                                              {}
-                                              column-mapping)]
-                                         (assoc acc
-                                                (id-attr-k result)
-                                                result)))
-                                     {}
-                                     rows)
-
-                      results (mapv (fn [id]
-                                      (get results-by-id id)) ids)]
-                  (auth/redact env
-                               results))
+                      pool-wrapper (get-in env [::rad.sql/connection-pools schema])
+                      pg2? (= :pg2 (:driver pool-wrapper))
+                      ;; Use pg2 fast path when available
+                      results-by-id
+                      (if pg2?
+                        ;; pg2 zero-copy path: single-pass transformation
+                        (let [rows (pg2/pg2-query-raw! (:pool pool-wrapper) query)]
+                          (reduce
+                           (fn [acc row]
+                             (let [result (pg2-transform-row row)]
+                               (assoc acc (id-attr-k result) result)))
+                           {}
+                           rows))
+                        ;; Standard path: eql-query! + decode + column-mapping
+                        (let [rows (sql.query/eql-query! env query schema input)]
+                          (reduce
+                           (fn [acc row]
+                             (let [decoded-row (decode-row row)
+                                   result (reduce
+                                           (fn [acc [output-path column]]
+                                             (let [value (get decoded-row column)]
+                                               (if (and (nil? value) (= (count output-path) 2))
+                                                 acc
+                                                 (assoc-in acc output-path value))))
+                                           {}
+                                           column-mapping)]
+                               (assoc acc (id-attr-k result) result)))
+                           {}
+                           rows)))
+                      results (mapv (fn [id] (get results-by-id id)) ids)]
+                  (auth/redact env results))
                 {:op-name op-name}))
              ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
@@ -173,10 +236,13 @@
                                      :from table
                                      :where [:in relationship-column ids]
                                      :group-by [relationship-column]})
-                             rows (sql.query/eql-query! env
-                                                        query
-                                                        schema
-                                                        input)
+                             pool-wrapper (get-in env [::rad.sql/connection-pools schema])
+                             pg2? (= :pg2 (:driver pool-wrapper))
+                             ;; pg2 path: query returns {:k uuid :v [uuid...]} directly
+                             ;; No type transformation needed for UUIDs
+                             rows (if pg2?
+                                    (pg2/pg2-query-raw! (:pool pool-wrapper) query)
+                                    (sql.query/eql-query! env query schema input))
                              results-by-id (reduce (fn [acc {:keys [k v]}]
                                                      (assoc acc k
                                                             {attr-k (mapv (fn [v]
@@ -212,6 +278,12 @@
           target-attr (k->attr target-k)
           column->outputs (get-column->outputs target-k id-attr->attributes k->attr true)
           column-mapping (get-column-mapping column->outputs)
+          column->attr (get-column->attr target-attr id-attr->attributes k->attr)
+          ;; Compile the row decoder once at resolver generation time
+          decode-row (compile-row-decoder-for-resolver column->attr)
+          ;; pg2 zero-copy: compile transformer that goes directly from pg2 raw -> resolver output
+          pg2-column-config (build-pg2-column-config column-mapping column->attr)
+          pg2-transform-row (mt/compile-pg2-row-transformer pg2-column-config)
           outputs (vec (flatten (vals column->outputs)))
           columns (keys column->outputs)
           table (get-table target-attr)
@@ -232,23 +304,34 @@
                      query (sql/format {:select columns
                                         :from table
                                         :where [:in ref-column ids]})
-                     rows (sql.query/eql-query! env
-                                                query
-                                                schema
-                                                input)
-                     results-by-id (reduce
-                                    (fn [acc row]
-                                      (let [result
-                                            (reduce
-                                             (fn [acc [output-path column]]
-                                               (assoc-in acc output-path (get row column)))
-                                             {}
-                                             column-mapping)]
-                                        (assoc acc
-                                               (get-in result [ref id-attr-k])
-                                               result)))
-                                    {}
-                                    rows)
+                     pool-wrapper (get-in env [::rad.sql/connection-pools schema])
+                     pg2? (= :pg2 (:driver pool-wrapper))
+                     ;; Transform all SQL values in one pass
+                     results-by-id
+                     (if pg2?
+                       ;; pg2 zero-copy path: single-pass transformation
+                       (let [rows (pg2/pg2-query-raw! (:pool pool-wrapper) query)]
+                         (reduce
+                          (fn [acc row]
+                            (let [result (pg2-transform-row row)]
+                              (assoc acc (get-in result [ref id-attr-k]) result)))
+                          {}
+                          rows))
+                       ;; Standard path: eql-query! + decode + column-mapping
+                       (let [rows (sql.query/eql-query! env query schema input)]
+                         (reduce
+                          (fn [acc row]
+                            (let [decoded-row (decode-row row)
+                                  result
+                                  (reduce
+                                   (fn [acc [output-path column]]
+                                     (let [value (get decoded-row column)]
+                                       (assoc-in acc output-path value)))
+                                   {}
+                                   column-mapping)]
+                              (assoc acc (get-in result [ref id-attr-k]) result)))
+                          {}
+                          rows)))
                      results (mapv (fn [id]
                                      (when-let [outputs (get results-by-id id)]
                                        (assoc outputs attr-k outputs)))
