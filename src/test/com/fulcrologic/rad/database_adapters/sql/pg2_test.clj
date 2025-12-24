@@ -195,3 +195,118 @@
   (testing "handles no placeholders"
     (is (= "SELECT * FROM users"
            (pg2/convert-params "SELECT * FROM users")))))
+
+;; =============================================================================
+;; JDBC URL parsing tests
+;; =============================================================================
+
+(deftest parse-jdbc-url-test
+  (testing "parses standard JDBC URL with all components"
+    (let [result (pg2/parse-jdbc-url "jdbc:postgresql://localhost:5432/mydb?user=admin&password=secret")]
+      (is (= "localhost" (:host result)))
+      (is (= 5432 (:port result)))
+      (is (= "mydb" (:database result)))
+      (is (= "admin" (:user result)))
+      (is (= "secret" (:password result)))))
+
+  (testing "parses URL with non-standard port"
+    (let [result (pg2/parse-jdbc-url "jdbc:postgresql://db.example.com:5433/production?user=app&password=pass123")]
+      (is (= "db.example.com" (:host result)))
+      (is (= 5433 (:port result)))
+      (is (= "production" (:database result)))))
+
+  (testing "defaults to port 5432 when not specified"
+    (let [result (pg2/parse-jdbc-url "jdbc:postgresql://localhost/testdb?user=test&password=test")]
+      (is (= "localhost" (:host result)))
+      (is (= 5432 (:port result)))
+      (is (= "testdb" (:database result)))))
+
+  (testing "handles URL without query parameters"
+    (let [result (pg2/parse-jdbc-url "jdbc:postgresql://localhost:5432/mydb")]
+      (is (= "localhost" (:host result)))
+      (is (= 5432 (:port result)))
+      (is (= "mydb" (:database result)))
+      (is (nil? (:user result)))
+      (is (nil? (:password result)))))
+
+  (testing "handles IP address as host"
+    (let [result (pg2/parse-jdbc-url "jdbc:postgresql://192.168.1.100:5432/db?user=u&password=p")]
+      (is (= "192.168.1.100" (:host result)))
+      (is (= 5432 (:port result)))))
+
+  (testing "handles special characters in password"
+    (let [result (pg2/parse-jdbc-url "jdbc:postgresql://localhost:5432/db?user=admin&password=p%40ss")]
+      (is (= "admin" (:user result)))
+      (is (= "p%40ss" (:password result))))))
+
+;; =============================================================================
+;; Pool configuration tests
+;; =============================================================================
+
+(deftest build-pool-config-test
+  (testing "builds config from pg2/config"
+    (let [config {:pg2/config {:host "localhost"
+                               :port 5432
+                               :user "testuser"
+                               :password "testpass"
+                               :database "testdb"}}
+          result (pg2/build-pool-config config)]
+      (is (= "localhost" (:host result)))
+      (is (= 5432 (:port result)))
+      (is (= "testuser" (:user result)))
+      (is (= "testpass" (:password result)))
+      (is (= "testdb" (:database result)))
+      ;; Check defaults are applied
+      (is (= 2 (:pool-min-size result)))
+      (is (= 10 (:pool-max-size result)))))
+
+  (testing "builds config from jdbc-url"
+    (let [config {:pg2/jdbc-url "jdbc:postgresql://dbhost:5433/proddb?user=prod&password=secret"}
+          result (pg2/build-pool-config config)]
+      (is (= "dbhost" (:host result)))
+      (is (= 5433 (:port result)))
+      (is (= "proddb" (:database result)))
+      (is (= "prod" (:user result)))
+      (is (= "secret" (:password result)))))
+
+  (testing "merges pool options"
+    (let [config {:pg2/config {:host "localhost"
+                               :port 5432
+                               :database "testdb"}
+                  :pg2/pool {:pool-min-size 5
+                             :pool-max-size 20}}
+          result (pg2/build-pool-config config)]
+      (is (= 5 (:pool-min-size result)))
+      (is (= 20 (:pool-max-size result)))))
+
+  (testing "pool options override defaults"
+    (let [config {:pg2/config {:host "localhost" :port 5432 :database "db"}
+                  :pg2/pool {:pool-min-size 1}}
+          result (pg2/build-pool-config config)]
+      (is (= 1 (:pool-min-size result)))
+      ;; pool-max-size should still get default
+      (is (= 10 (:pool-max-size result)))))
+
+  (testing "prefers pg2/config over jdbc-url when both present"
+    (let [config {:pg2/config {:host "primary" :port 5432 :database "maindb"}
+                  :pg2/jdbc-url "jdbc:postgresql://fallback:5433/otherdb?user=x&password=y"}
+          result (pg2/build-pool-config config)]
+      (is (= "primary" (:host result)))
+      (is (= "maindb" (:database result))))))
+
+;; =============================================================================
+;; Constraint handling tests
+;; =============================================================================
+
+(deftest add-referential-column-statement-test
+  (testing "generates correct ALTER TABLE statement"
+    (let [result (pg2/add-referential-column-statement
+                  "accounts" "address_id" "UUID" "addresses" "id")]
+      (is (= "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS address_id UUID REFERENCES addresses(id) DEFERRABLE INITIALLY DEFERRED;\n"
+             result))))
+
+  (testing "handles different types"
+    (let [result (pg2/add-referential-column-statement
+                  "orders" "customer_id" "BIGINT" "customers" "id")]
+      (is (= "ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id BIGINT REFERENCES customers(id) DEFERRABLE INITIALLY DEFERRED;\n"
+             result)))))
