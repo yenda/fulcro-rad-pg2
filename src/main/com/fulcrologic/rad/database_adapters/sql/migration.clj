@@ -148,37 +148,55 @@
              new-refs (mapv op (set ref))]
          (vec (concat new-tables new-ids new-columns new-refs))))
 
+(defn- extract-jdbc-datasource
+  "Extract JDBC datasource from pool wrapper.
+   For pg2 pools, returns nil (pg2 doesn't support JDBC operations like Flyway).
+   For HikariCP pools, returns the HikariDataSource."
+  [pool-or-wrapper]
+  (if (map? pool-or-wrapper)
+    (let [{:keys [driver pool]} pool-or-wrapper]
+      (case driver
+        :pg2 nil  ; pg2 can't be used for JDBC operations
+        pool))    ; HikariCP returns the datasource
+    ;; Backward compatibility: raw datasource
+    pool-or-wrapper))
+
 (defn migrate! [config all-attributes connection-pools]
   (let [database-map (some-> config ::rad.sql/databases)]
     (doseq [[dbkey dbconfig] database-map]
-      (let [{:sql/keys [auto-create-missing? schema vendor]
+      (let [{:sql/keys [auto-create-missing? schema vendor driver]
              :flyway/keys [migrate? migrations schema]} dbconfig
-            ^HikariDataSource pool (get connection-pools dbkey)
-            db {:datasource pool}]
-        (if pool
-          (cond
-            (and migrate? (seq migrations))
-            (do
-              (log/info (str "Processing Flywawy migrations for " dbkey))
-              (let [flyway (-> (Flyway/configure)
-                               (.dataSource pool)
-                               (.locations (into-array String migrations))
-                               (.baselineOnMigrate true)
-                               (.defaultSchema (or schema "public"))
-                               (.load))]
-                (log/info "Migration location is set to: " migrations)
-                (.migrate flyway)))
+            pool-wrapper (get connection-pools dbkey)
+            ^HikariDataSource jdbc-pool (extract-jdbc-datasource pool-wrapper)]
+        (cond
+          (nil? pool-wrapper)
+          (log/error (str "No pool for " dbkey ". Skipping migrations."))
 
-            auto-create-missing?
-            (let [adapter (case vendor
-                            :postgresql (vendor/->PostgreSQLAdapter)
-                            (vendor/->H2Adapter))
-                  stmts (automatic-schema schema adapter all-attributes)]
-              (log/info "Automatically trying to create SQL schema from attributes.")
-              (doseq [s stmts]
-                (try
-                  (jdbc/execute! pool [s])
-                  (catch Exception e
-                    (log/error e s)
-                    (throw e))))))
-          (log/error (str "No pool for " dbkey ". Skipping migrations.")))))))
+          (and (= driver :pg2) (or migrate? auto-create-missing?))
+          (log/warn (str "Flyway migrations and auto-create-missing require JDBC. "
+                         "Use a separate HikariCP config for migrations with pg2: " dbkey))
+
+          (and migrate? (seq migrations) jdbc-pool)
+          (do
+            (log/info (str "Processing Flyway migrations for " dbkey))
+            (let [flyway (-> (Flyway/configure)
+                             (.dataSource jdbc-pool)
+                             (.locations (into-array String migrations))
+                             (.baselineOnMigrate true)
+                             (.defaultSchema (or schema "public"))
+                             (.load))]
+              (log/info "Migration location is set to: " migrations)
+              (.migrate flyway)))
+
+          (and auto-create-missing? jdbc-pool)
+          (let [adapter (case vendor
+                          :postgresql (vendor/->PostgreSQLAdapter)
+                          (vendor/->H2Adapter))
+                stmts (automatic-schema schema adapter all-attributes)]
+            (log/info "Automatically trying to create SQL schema from attributes.")
+            (doseq [s stmts]
+              (try
+                (jdbc/execute! jdbc-pool [s])
+                (catch Exception e
+                  (log/error e s)
+                  (throw e))))))))))

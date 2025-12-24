@@ -1,98 +1,78 @@
 (ns com.fulcrologic.rad.database-adapters.sql.perf.benchmark
-  "Benchmark utilities for performance testing.
+  "Benchmark utilities using criterium for proper JVM benchmarking.
 
-   Provides statistical measurement of operations with:
-   - Configurable iterations and warm-up
-   - Min/max/mean/median/p95/p99 statistics
-   - Formatted output for comparison"
+   Criterium handles:
+   - JIT warmup estimation
+   - GC between measurements
+   - Statistical analysis with confidence intervals
+   - Outlier detection"
   (:require
-   [clojure.string :as str]))
+   [criterium.core :as crit]))
 
-(defn percentile
-  "Calculate the nth percentile of a sorted sequence of numbers."
-  [sorted-values n]
-  (let [cnt (count sorted-values)
-        idx (-> (* n cnt)
-                (/ 100)
-                (Math/ceil)
-                (dec)
-                (max 0)
-                (min (dec cnt))
-                int)]
-    (nth sorted-values idx)))
+;; =============================================================================
+;; Criterium-based benchmarking
+;; =============================================================================
 
-(defn statistics
-  "Calculate statistics for a sequence of timing values (in ms)."
-  [times]
-  (let [sorted (vec (sort times))
-        cnt (count sorted)]
-    {:min (first sorted)
-     :max (last sorted)
-     :mean (/ (reduce + times) cnt)
-     :median (percentile sorted 50)
-     :p95 (percentile sorted 95)
-     :p99 (percentile sorted 99)
-     :count cnt}))
+(defn- safe-first-ms
+  "Safely extract first value and convert to ms, returning 0 if nil."
+  [coll]
+  (if-let [v (first coll)]
+    (* 1e3 v)
+    0.0))
 
-(defn format-stats
-  "Format statistics for display."
-  [{:keys [min max mean median p95 p99 count]}]
-  (format "n=%d  min=%.2f  mean=%.2f  median=%.2f  p95=%.2f  p99=%.2f  max=%.2f ms"
-          count min mean median p95 p99 max))
-
-(defn measure-ns
-  "Measure execution time in nanoseconds."
+(defn quick-bench*
+  "Run a quick benchmark and return results map.
+   Uses criterium's quick-bench which is suitable for operations > 1ms."
   [f]
-  (let [start (System/nanoTime)
-        result (f)
-        elapsed (- (System/nanoTime) start)]
-    {:result result :elapsed-ns elapsed}))
+  (let [results (crit/quick-benchmark* f {})]
+    {:mean (safe-first-ms (:mean results))
+     :std-dev (safe-first-ms (:std-dev results))
+     :variance (if-let [v (first (:variance results))] (* 1e6 v) 0.0)
+     :lower-q (safe-first-ms (:lower-q results))
+     :upper-q (safe-first-ms (:upper-q results))
+     :samples (or (:sample-count results) 0)
+     :outliers (:outliers results)
+     :overhead-ns (:overhead results)}))
 
-(defn run-benchmark
-  "Run a benchmark with warm-up iterations and return statistics.
+(defn bench*
+  "Run a thorough benchmark and return results map.
+   Takes longer but provides more accurate results."
+  [f]
+  (let [results (crit/benchmark* f {})]
+    {:mean (safe-first-ms (:mean results))
+     :std-dev (safe-first-ms (:std-dev results))
+     :variance (if-let [v (first (:variance results))] (* 1e6 v) 0.0)
+     :lower-q (safe-first-ms (:lower-q results))
+     :upper-q (safe-first-ms (:upper-q results))
+     :samples (or (:sample-count results) 0)
+     :outliers (:outliers results)
+     :overhead-ns (:overhead results)}))
 
-   Options:
-   - :warmup - number of warm-up iterations (default 5)
-   - :iterations - number of measured iterations (default 50)
-   - :setup - function called before each iteration (optional)
-   - :teardown - function called after each iteration (optional)
-
-   Returns map with :stats and :results (last result)"
-  ([f] (run-benchmark f {}))
-  ([f {:keys [warmup iterations setup teardown]
-       :or {warmup 5 iterations 50}}]
-   ;; Warm-up phase
-   (dotimes [_ warmup]
-     (when setup (setup))
-     (f)
-     (when teardown (teardown)))
-
-   ;; Measurement phase
-   (let [times (atom [])]
-     (dotimes [_ iterations]
-       (when setup (setup))
-       (let [{:keys [result elapsed-ns]} (measure-ns f)]
-         (swap! times conj (/ elapsed-ns 1e6)) ; convert to ms
-         (when teardown (teardown))))
-     {:stats (statistics @times)
-      :times @times})))
+(defn format-criterium-stats
+  "Format criterium statistics for display."
+  [{:keys [mean std-dev lower-q upper-q samples]}]
+  (format "mean=%.3f ms ±%.3f  [%.3f, %.3f]  n=%d"
+          mean std-dev lower-q upper-q samples))
 
 (defn benchmark!
-  "Run a named benchmark and print results.
+  "Run a named benchmark using criterium and print results.
 
-   Options same as run-benchmark plus:
-   - :description - optional longer description"
-  [name f & {:keys [description] :as opts}]
-  (print (str "  " name "... "))
-  (flush)
-  (let [{:keys [stats]} (run-benchmark f opts)]
-    (println (format-stats stats))
-    stats))
+   Options:
+   - :thorough? - use full benchmark instead of quick-bench (default false)
+   - :iterations, :warmup - ignored (criterium handles this automatically)"
+  ([name f] (benchmark! name f {}))
+  ([name f opts]
+   (print (str "  " name "... "))
+   (flush)
+   (let [bench-fn (if (:thorough? opts) bench* quick-bench*)
+         stats (bench-fn f)]
+     (println (format-criterium-stats stats))
+     stats)))
 
 (defmacro with-benchmark
   "Convenience macro for running a benchmark.
 
-   (with-benchmark \"my-test\" {:iterations 100}
+   (with-benchmark \"my-test\" {}
      (do-something))"
   [name opts & body]
   `(benchmark! ~name (fn [] ~@body) ~@(mapcat identity opts)))
@@ -114,3 +94,42 @@
      :current-mean current-mean
      :diff-pct diff-pct
      :faster? (neg? diff-pct)}))
+
+(defn format-comparison
+  "Format a comparison between baseline and current stats."
+  [name baseline current]
+  (let [{:keys [baseline-mean current-mean diff-pct faster?]} (compare-stats baseline current)]
+    (format "%-45s baseline: %.3f ms  current: %.3f ms  change: %+.1f%% %s"
+            name baseline-mean current-mean diff-pct
+            (if faster? "✓" ""))))
+
+;; =============================================================================
+;; Legacy utilities (kept for backward compatibility)
+;; =============================================================================
+
+(defn percentile
+  "Calculate the nth percentile of a sorted sequence of numbers."
+  [sorted-values n]
+  (let [cnt (count sorted-values)
+        idx (-> (* n cnt)
+                (/ 100)
+                (Math/ceil)
+                (dec)
+                (max 0)
+                (min (dec cnt))
+                int)]
+    (nth sorted-values idx)))
+
+(defn statistics
+  "Calculate statistics for a sequence of timing values (in ms).
+   DEPRECATED: Use criterium-based functions instead."
+  [times]
+  (let [sorted (vec (sort times))
+        cnt (count sorted)]
+    {:min (first sorted)
+     :max (last sorted)
+     :mean (/ (reduce + times) cnt)
+     :median (percentile sorted 50)
+     :p95 (percentile sorted 95)
+     :p99 (percentile sorted 99)
+     :count cnt}))

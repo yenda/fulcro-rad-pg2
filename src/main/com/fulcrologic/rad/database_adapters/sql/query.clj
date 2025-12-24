@@ -8,6 +8,7 @@
   (:require
    [com.fulcrologic.guardrails.core :refer [=> >defn ?]]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [jsonista.core :as j]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
@@ -42,13 +43,37 @@
 ;; Type coercion is handled by the row builder
 (def row-builder (rs/as-maps-adapter rs/as-unqualified-kebab-maps RAD-column-reader))
 
+(defn jdbc-query!
+  "Execute a query using next.jdbc. This is the default implementation."
+  [datasource query]
+  (jdbc/execute! datasource query {:builder-fn row-builder}))
+
+(defn- execute-query!
+  "Execute a query using the appropriate driver.
+
+   pool-or-wrapper can be:
+   - {:driver :pg2 :pool pg2-pool} - pg2 driver
+   - {:driver :hikaricp :pool hikari-datasource} - HikariCP/next.jdbc
+   - raw datasource (backward compatibility)"
+  [pool-or-wrapper query]
+  (if (map? pool-or-wrapper)
+    (let [{:keys [driver pool]} pool-or-wrapper]
+      (case driver
+        :pg2 (pg2/pg2-query! pool query)
+        ;; Default: HikariCP/next.jdbc
+        (jdbc-query! pool query)))
+    ;; Backward compatibility: raw datasource
+    (jdbc-query! pool-or-wrapper query)))
+
 (>defn eql-query!
-       [{::rad.sql/keys [connection-pools]}
+       [{::rad.sql/keys [connection-pools query-fn]}
         query
         schema
         resolver-input]
        [any? vector? keyword? coll? => (? coll?)]
-       (let [datasource (or (get connection-pools schema) (throw (ex-info "Data source missing for schema" {:schema schema})))]
+       (let [pool-wrapper (or (get connection-pools schema)
+                              (throw (ex-info "Data source missing for schema" {:schema schema})))
+             execute-fn (or query-fn execute-query!)]
          (timer "SQL query with execute!"
-                (jdbc/execute! datasource query {:builder-fn row-builder})
+                (execute-fn pool-wrapper query)
                 {:query query})))

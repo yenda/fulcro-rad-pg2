@@ -26,7 +26,7 @@
 ;; =============================================================================
 
 (def test-db-config
-  {:jdbcUrl "jdbc:postgresql://localhost:5433/fulcro-rad-pg2?user=user&password=password"})
+  {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
 
 (def key->attribute (enc/keys-by ::attr/qualified-key perf-attrs/all-attributes))
 

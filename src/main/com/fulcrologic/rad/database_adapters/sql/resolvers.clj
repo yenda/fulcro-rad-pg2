@@ -5,6 +5,8 @@
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
+   [com.fulcrologic.rad.database-adapters.sql.malli-transform :as mt]
+   [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
    [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
    [com.fulcrologic.rad.form :as rad.form]
@@ -13,9 +15,34 @@
    [edn-query-language.core :as eql]
    [honey.sql :as sql]
    [next.jdbc :as jdbc]
+   [pg.core :as pg]
+   [pg.pool :as pg.pool]
    [taoensso.timbre :as log])
   (:import
    (org.postgresql.util PSQLException)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Driver Abstraction
+;;
+;; These functions allow transparent use of either HikariCP/next.jdbc or pg2
+
+(defn- extract-pool
+  "Extract the actual pool/datasource from a pool wrapper.
+   Returns [driver pool] tuple."
+  [pool-or-wrapper]
+  (if (map? pool-or-wrapper)
+    [(:driver pool-or-wrapper) (:pool pool-or-wrapper)]
+    [:hikaricp pool-or-wrapper]))
+
+(defn- execute-sql!
+  "Execute SQL statement with driver dispatch.
+   For reads, returns vector of maps. For writes, returns affected count."
+  [pool-or-wrapper sql-vec]
+  (let [[driver pool] (extract-pool pool-or-wrapper)]
+    (case driver
+      :pg2 (pg2/pg2-query! pool sql-vec)
+      ;; Default: next.jdbc
+      (jdbc/execute! pool sql-vec))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Writes
@@ -46,13 +73,15 @@
                       all-keys)]
     schemas))
 
-(defn- generate-tempids [ds key->attribute delta]
+(defn- generate-tempids [pool-or-wrapper key->attribute delta]
   (reduce
    (fn [result [table id]]
      (if (tempid/tempid? id)
        (let [{::attr/keys [type] :as id-attr} (key->attribute table)
              real-id (if (#{:int :long} type)
-                       (:id (first (jdbc/execute! ds [(format "SELECT NEXTVAL('%s') AS id" (sql.schema/sequence-name id-attr))])))
+                       (:id (first (execute-sql! pool-or-wrapper
+                                                 [(format "SELECT NEXTVAL('%s') AS id"
+                                                          (sql.schema/sequence-name id-attr))])))
                        (ids/new-uuid))]
          (assoc result id real-id))
        result))
@@ -79,10 +108,41 @@
 (defn form->sql-value [{::attr/keys [type cardinality]
                         ::rad.sql/keys [form->sql-value]} form-value]
   (cond
-    (and (= :ref type) (not= :many cardinality) (eql/ident? form-value)) (second form-value)
-    form->sql-value (form->sql-value form-value)
-    (= type :enum) (str form-value)
-    :else form-value))
+    ;; References: extract ID from ident
+    (and (= :ref type) (not= :many cardinality) (eql/ident? form-value))
+    (second form-value)
+
+    ;; Custom transformer takes precedence
+    form->sql-value
+    (form->sql-value form-value)
+
+    ;; Use Malli-based transformation for all types
+    :else
+    (mt/encode-for-sql type form-value)))
+
+(defn sql->model-value
+  "Transform SQL value to Clojure model value.
+
+   This is the read-path counterpart to form->sql-value. It applies
+   type-specific transformations to convert database values back to
+   their Clojure representations.
+
+   Arguments:
+     attr      - The attribute map containing ::attr/type and optional ::rad.sql/sql->model-value
+     sql-value - The value retrieved from the database
+
+   Returns:
+     The transformed Clojure value."
+  [{::attr/keys [type]
+    ::rad.sql/keys [sql->model-value]} sql-value]
+  (cond
+    ;; Custom transformer takes precedence
+    sql->model-value
+    (sql->model-value sql-value)
+
+    ;; Use Malli-based transformation
+    :else
+    (mt/decode-from-sql type sql-value)))
 
 (defn scalar-insert
   [{::attr/keys [key->attribute] :as env} schema-to-save tempids [table id :as ident] diff]
@@ -255,6 +315,13 @@
               :message (.getMessage e)}
              e)))
 
+(defn- pg2-execute!
+  "Execute SQL using pg2 connection (for use within transaction)."
+  [conn sql-vec]
+  (let [[sql & params] sql-vec
+        pg2-sql (pg2/convert-params sql)]
+    (pg/execute conn pg2-sql {:params (vec params)})))
+
 (defn save-form!
   "Does all the necessary operations to persist mutations from the
   form delta into the appropriate tables in the appropriate databases.
@@ -280,9 +347,10 @@
       ;; TASK: Transaction should be opened on all databases at once, so that they all succeed or fail
       (doseq [schema (keys connection-pools)]
         (let [adapter (get adapters schema default-adapter)
-              ds (get connection-pools schema)
-              {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta)) ; any non-fk column with a tempid
-              update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta)) ; any non-fk columns on entries with pre-existing id
+              pool-wrapper (get connection-pools schema)
+              [driver pool] (extract-pool pool-wrapper)
+              {:keys [tempids insert-scalars]} (log/spy :trace (delta->scalar-inserts env schema delta))
+              update-scalars (log/spy :trace (delta->scalar-updates env tempids schema delta))
               steps (concat update-scalars insert-scalars)]
           (dh/with-retry
             {:retry-if (fn [_return-value exception-thrown]
@@ -293,14 +361,23 @@
                            false))
              :max-retries 4
              :backoff-ms [100 200 2.0]}
-            (jdbc/with-transaction [tx ds {:isolation :serializable}]
-              ;; allow relaxed FK constraints until end of txn
-              (when adapter
-                (vendor/relax-constraints! adapter tx))
-              (doseq [stmt-with-params steps]
-                (log/debug "save-form!"
-                           {:stmt-with-params stmt-with-params})
-                (jdbc/execute! tx stmt-with-params))))
+            (case driver
+              :pg2
+              (pg.pool/with-conn [conn pool]
+                (pg/with-transaction [tx conn {:isolation-level :serializable}]
+                  (when adapter
+                    (vendor/relax-constraints! adapter tx pg2-execute!))
+                  (doseq [stmt-with-params steps]
+                    (log/debug "save-form!" {:stmt-with-params stmt-with-params})
+                    (pg2-execute! tx stmt-with-params))))
+
+              ;; Default: HikariCP/next.jdbc
+              (jdbc/with-transaction [tx pool {:isolation :serializable}]
+                (when adapter
+                  (vendor/relax-constraints! adapter tx))
+                (doseq [stmt-with-params steps]
+                  (log/debug "save-form!" {:stmt-with-params stmt-with-params})
+                  (jdbc/execute! tx stmt-with-params)))))
           (swap! result update :tempids merge tempids)))
       @result)
     (catch PSQLException e
