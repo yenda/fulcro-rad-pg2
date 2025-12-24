@@ -16,8 +16,8 @@
    [com.fulcrologic.rad.ids :as ids]
    [diehard.core :as dh]
    [edn-query-language.core :as eql]
-   [honey.sql :as sql]
    [malli.experimental :as mx]
+   [pg.honey :as pgh]
    [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.timbre :as log])
@@ -177,7 +177,7 @@
                             (assoc acc (keyword (sql.schema/column-name attr)) v))))
                       {(keyword (sql.schema/column-name id-attr)) real-id}
                       scalar-attrs)]
-          (sql/format {:insert-into table-kw
+          (pgh/format {:insert-into table-kw
                        :values [values]
                        :returning [:*]}))))))
 
@@ -190,7 +190,7 @@
         (let [table-kw (keyword (sql.schema/table-name key->attribute id-attr))
               id-col-kw (keyword (sql.schema/column-name id-attr))]
           (if (:delete diff)
-            (sql/format {:delete-from table-kw :where [:= id-col-kw id]})
+            (pgh/format {:delete-from table-kw :where [:= id-col-kw id]})
             (let [scalar-attrs (keep #(table-local-attr key->attribute target-schema %) (keys diff))
                   values (reduce
                           (fn [acc attr]
@@ -210,10 +210,10 @@
                           scalar-attrs)]
               (cond
                 (= :delete values)
-                (sql/format {:delete-from table-kw :where [:= id-col-kw id]})
+                (pgh/format {:delete-from table-kw :where [:= id-col-kw id]})
 
                 (seq values)
-                (sql/format {:update table-kw :set values :where [:= id-col-kw id]})))))))))
+                (pgh/format {:update table-kw :set values :where [:= id-col-kw id]})))))))))
 
 (defn delta->sql-plan
   "Generate all SQL statements for a delta. Pure function.
@@ -274,11 +274,11 @@
 ;; Side Effects: SQL Execution
 
 (defn- execute-statement!
-  "Execute a single SQL statement. Side effect."
+  "Execute a single SQL statement. Side effect.
+   SQL is expected to use $1, $2... placeholders (from pgh/format)."
   [conn sql-vec]
-  (let [[sql & params] sql-vec
-        pg2-sql (pg2/convert-params sql)]
-    (pg/execute conn pg2-sql {:params (vec params)})))
+  (let [[sql & params] sql-vec]
+    (pg/execute conn sql {:params (vec params)})))
 
 (defn execute-plan!
   "Execute a SQL plan within a transaction. Side effect at the edge.

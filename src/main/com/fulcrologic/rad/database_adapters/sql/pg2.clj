@@ -196,7 +196,9 @@
 ;; =============================================================================
 
 (defn convert-params
-  "Convert ? placeholders to $1, $2, etc. for pg2."
+  "Convert ? placeholders to $1, $2, etc. for pg2.
+   Migration helper for converting JDBC-style SQL to pg2 format.
+   For new code, use pgh/format which generates $1, $2... directly."
   [sql]
   (loop [s sql
          idx 1]
@@ -290,26 +292,26 @@
 
 (mx/defn pg2-query! :- [:vector :map]
   "Execute a SQL query using pg2.
-   Takes a pg2 pool and a HoneySQL-formatted query vector [sql & params].
+   Takes a pg2 pool and a query vector [sql & params].
+   SQL must use $1, $2... placeholders (not ?). Use pgh/format for HoneySQL maps.
    Returns a vector of maps with kebab-case keyword keys."
   [pool :- :some
    query :- [:cat :string [:* :any]]]
   (let [[sql & params] query]
     (pool/with-conn [conn pool]
-      (let [pg2-sql (convert-params sql)
-            result (pg/execute conn pg2-sql {:params (vec params)})]
+      (let [result (pg/execute conn sql {:params (vec params)})]
         (mapv normalize-row result)))))
 
 (mx/defn pg2-query-raw! :- [:vector :map]
   "Execute a SQL query using pg2, returning raw results.
    Returns pg2's native format without normalization.
+   SQL must use $1, $2... placeholders (not ?). Use pgh/format for HoneySQL maps.
    Use with compiled row transformers for maximum performance."
   [pool :- :some
    query :- [:cat :string [:* :any]]]
   (let [[sql & params] query]
     (pool/with-conn [conn pool]
-      (let [pg2-sql (convert-params sql)]
-        (pg/execute conn pg2-sql {:params (vec params)})))))
+      (pg/execute conn sql {:params (vec params)}))))
 
 (mx/defn pg2-query-prepared! :- [:vector :map]
   "Execute a pre-compiled SQL query with array parameter.

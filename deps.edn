@@ -12,6 +12,7 @@
            com.github.seancorfield/honeysql {:mvn/version "2.4.1026"}
            diehard/diehard                     {:mvn/version "0.11.12"}
            com.github.igrishaev/pg2-core {:mvn/version "0.1.41"}
+           com.github.igrishaev/pg2-honey {:mvn/version "0.1.41"}
            ;; PostgreSQL driver - pg2 needs it for exception classes
            org.postgresql/postgresql {:mvn/version "42.6.0"}
            com.wsscode/pathom3 {:git/url "https://github.com/wilkerlucio/pathom3.git"
