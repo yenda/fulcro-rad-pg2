@@ -13,7 +13,7 @@
 (>defn table-name
        "Get the table name for a given identity key"
        ([key->attribute {::attr/keys [identity? identities]
-                         ::rad.sql/keys [table] :as attr}]
+                         ::rad.sql/keys [_table] :as attr}]
         [map? ::attr/attribute => string?]
         (if identity?
           (table-name attr)
@@ -58,15 +58,15 @@
 (defn sequence-name [id-attribute]
   (str (name (table-name id-attribute)) "_" (name (column-name id-attribute)) "_seq"))
 
-(defn tables-and-columns
-  "Return a sequence of [table-name column-name] that the given attribute appears at."
-  [key->attribute {::attr/keys [identity? identities] :as attribute}]
-  [(s/map-of qualified-keyword? ::attr/attribute) ::attr/attribute => (s/coll-of (s/tuple string? string?))]
-  (let [col-name (column-name key->attribute attribute)]
-    (if identity?
-      [[(table-name attribute) col-name]]
-      (mapv
-       (fn [id-key]
-         (let [id-attribute (key->attribute id-key)]
-           [(table-name id-attribute) col-name]))
-       identities))))
+(>defn tables-and-columns
+       "Return a sequence of [table-name column-name] that the given attribute appears at."
+       [key->attribute {::attr/keys [identity? identities] :as attribute}]
+       [(s/map-of qualified-keyword? ::attr/attribute) ::attr/attribute => (s/coll-of (s/tuple string? string?))]
+       (let [col-name (column-name key->attribute attribute)]
+         (if identity?
+           [[(table-name attribute) col-name]]
+           (mapv
+            (fn [id-key]
+              (let [id-attribute (key->attribute id-key)]
+                [(table-name id-attribute) col-name]))
+            identities))))

@@ -69,11 +69,11 @@
    For to-one refs: {:col [:attr-id-k {:attr-k [:target-k]}]}
    Skips to-many refs and reverse refs (handled by separate resolvers)."
   [id-attr-k id-attr->attributes k->attr target?]
-  (let [{::attr/keys [cardinality qualified-key target] :as id-attribute} (k->attr id-attr-k)
+  (let [{::attr/keys [qualified-key] :as id-attribute} (k->attr id-attr-k)
         outputs (reduce (fn [acc {::attr/keys [cardinality qualified-key target]
                                   ::rad.sql/keys [ref] :as attr}]
                           (if (or (= :many cardinality)
-                                  (and (= :one cardinality) (and ref (not target?))))
+                                  (and (= :one cardinality) ref (not target?)))
                             acc
                             (let [column (get-column attr)
                                   outputs (if cardinality
@@ -105,7 +105,7 @@
 
 (defn get-column->attr
   "Build a mapping from column keyword to attribute for value transformation."
-  [id-attr id-attr->attributes k->attr]
+  [id-attr id-attr->attributes _k->attr]
   (let [id-column (get-column id-attr)]
     (reduce (fn [acc attr]
               (assoc acc (get-column attr) attr))

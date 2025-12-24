@@ -24,6 +24,7 @@
    ```"
   (:require
    [camel-snake-kebab.core :as csk]
+   [clojure.string :as str]
    [malli.experimental :as mx]
    [pg.core :as pg]
    [pg.pool :as pool]
@@ -82,17 +83,17 @@
 ;; Encoder/Decoder registries for extensibility
 (defonce ^{:doc "Map of RAD type -> encoder function (Clojure -> SQL)"}
   encoders
-  (atom {:enum     keyword->sql-string
-         :keyword  keyword->sql-string
-         :symbol   symbol->sql-string
-         :instant  instant->timestamp}))
+  (atom {:enum keyword->sql-string
+         :keyword keyword->sql-string
+         :symbol symbol->sql-string
+         :instant instant->timestamp}))
 
 (defonce ^{:doc "Map of RAD type -> decoder function (SQL -> Clojure)"}
   decoders
-  (atom {:enum     sql-string->keyword
-         :keyword  sql-string->keyword
-         :symbol   sql-string->symbol
-         :instant  timestamp->instant}))
+  (atom {:enum sql-string->keyword
+         :keyword sql-string->keyword
+         :symbol sql-string->symbol
+         :instant timestamp->instant}))
 
 (defn register-encoder!
   "Register a custom encoder for a RAD type."
@@ -209,9 +210,9 @@
         query-params (when-let [q (.getQuery url)]
                        (into {}
                              (map (fn [pair]
-                                    (let [[k v] (clojure.string/split pair #"=")]
+                                    (let [[k v] (str/split pair #"=")]
                                       [(keyword k) v])))
-                             (clojure.string/split q #"&")))]
+                             (str/split q #"&")))]
     {:host host
      :port port
      :database database

@@ -10,7 +10,14 @@
   :cond-without-else {:level :off}}
 
  :lint-as
- {com.wsscode.pathom3.connect.operation/defresolver clojure.core/defn}
+ {com.wsscode.pathom3.connect.operation/defresolver clojure.core/defn
+  pg.pool/with-conn clojure.core/with-open}
+
+ ;; pg.core/with-transaction has a non-standard binding form [tx conn opts]
+ ;; We need to skip linting for it
+ :config-in-call
+ {pg.core/with-transaction {:linters {:unresolved-symbol {:level :off}
+                                      :invalid-arity {:level :off}}}}
 
  ;; Skip lint for files that use complex macros
  :config-in-ns
@@ -28,4 +35,14 @@
   com.fulcrologic.rad.database-adapters.sql.schema-test
   {:linters {:unresolved-symbol {:level :off}}}
   com.fulcrologic.rad.database-adapters.sql.save-form.generative-test
-  {:linters {:unresolved-symbol {:level :off}}}}}
+  {:linters {:unresolved-symbol {:level :off}}}
+  ;; Test namespaces with with-test-schema macro
+  com.fulcrologic.rad.database-adapters.sql.save-form.sequence-id-test
+  {:linters {:unresolved-symbol {:level :off}}}
+  ;; Benchmark runner uses pg.pool/with-conn
+  run-benchmark
+  {:linters {:unresolved-symbol {:level :off}}}
+  ;; Dev REPL namespace - intentionally has utilities available
+  user
+  {:linters {:unused-namespace {:level :off}
+             :unused-referred-var {:level :off}}}}}

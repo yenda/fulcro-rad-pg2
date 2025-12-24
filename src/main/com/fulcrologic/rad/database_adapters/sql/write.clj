@@ -81,7 +81,7 @@
    (fn [acc [ident attributes]]
      (reduce
       (fn [acc [attr-k {:keys [before after]}]]
-        (let [{::attr/keys [type cardinality]
+        (let [{::attr/keys [_type cardinality]
                ::rad.sql/keys [ref delete-referent?]} (key->attribute attr-k)]
           (if (and ref (not (= before after nil)))
             (case cardinality

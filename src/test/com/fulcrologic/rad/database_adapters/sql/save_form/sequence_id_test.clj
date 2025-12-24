@@ -9,16 +9,15 @@
    1. Unit tests for pure functions (no DB needed)
    2. Integration tests with pg2 pools (require PostgreSQL)"
   (:require
-   [clojure.test :refer [deftest is testing use-fixtures]]
+   [clojure.string :as str]
+   [clojure.test :refer [deftest is testing]]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
-   [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [pg.core :as pg]
    [pg.pool :as pool]
    [taoensso.encore :as enc]))
@@ -122,8 +121,8 @@
 (defn- split-sql-statements
   "Split a multi-statement SQL string into individual statements."
   [sql]
-  (->> (clojure.string/split sql #";\n")
-       (map clojure.string/trim)
+  (->> (str/split sql #";\n")
+       (map str/trim)
        (remove empty?)))
 
 (defn setup-test-schema
@@ -389,21 +388,20 @@
                                                  :item/quantity {:after 5}}}
                 env (make-env pool)
                 insert-result (write/save-form! env {::rad.form/delta insert-delta})
-                real-id (get (:tempids insert-result) tempid)]
+                real-id (get (:tempids insert-result) tempid)
+                ;; Update
+                update-delta {[:item/id real-id]
+                              {:item/name {:before "Original" :after "Updated"}
+                               :item/quantity {:before 5 :after 50}}}
+                update-result (write/save-form! env {::rad.form/delta update-delta})]
 
-            ;; Update
-            (let [update-delta {[:item/id real-id]
-                                {:item/name {:before "Original" :after "Updated"}
-                                 :item/quantity {:before 5 :after 50}}}
-                  update-result (write/save-form! env {::rad.form/delta update-delta})]
+            (is (empty? (:tempids update-result)) "No new tempids for update")
 
-              (is (empty? (:tempids update-result)) "No new tempids for update")
-
-              ;; Verify
-              (let [items (query-items pool)
-                    item (first items)]
-                (is (= "Updated" (:name item)))
-                (is (= 50 (:quantity item)))))))
+            ;; Verify
+            (let [items (query-items pool)
+                  item (first items)]
+              (is (= "Updated" (:name item)))
+              (is (= 50 (:quantity item))))))
         (finally
           (pool/close pool))))))
 

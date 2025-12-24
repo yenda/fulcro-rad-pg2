@@ -11,9 +11,7 @@
    - model->sql-value, sql->model-value"
   (:require
    [com.fulcrologic.rad.attributes :as rad.attr :refer [defattr]]
-   [com.fulcrologic.rad.database-adapters.sql :as rad.sql])
-  (:import
-   [java.time Instant]))
+   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]))
 
 ;; =============================================================================
 ;; Account - demonstrates basic types and to-one/to-many refs

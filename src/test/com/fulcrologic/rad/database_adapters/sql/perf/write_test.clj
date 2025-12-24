@@ -15,7 +15,6 @@
    [com.fulcrologic.rad.database-adapters.sql.perf.benchmark :as bench]
    [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
    [pg.pool :as pg.pool]

@@ -6,8 +6,7 @@
   (:require
    [clojure.set :as set]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
-   [next.jdbc :as jdbc]
-   [next.jdbc.sql :as sql]))
+   [next.jdbc :as jdbc]))
 
 ;; =============================================================================
 ;; State Snapshot
@@ -83,7 +82,7 @@
              ;; For each entity in delta, verify its scalar values are in the DB
              (let [tempids (:tempids result)]
                (reduce
-                (fn [acc [[id-key id] changes]]
+                (fn [acc [[id-key id] _changes]]
                   (if-not (:valid acc)
                     (reduced acc)
                     (let [real-id (if (tempid/tempid? id) (get tempids id) id)

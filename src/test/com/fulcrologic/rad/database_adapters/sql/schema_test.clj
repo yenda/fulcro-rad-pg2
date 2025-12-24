@@ -1,6 +1,7 @@
 (ns com.fulcrologic.rad.database-adapters.sql.schema-test
   "Tests for schema.clj - table/column name derivation from RAD attributes."
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [clojure.test.check.clojure-test :refer [defspec]]
    [clojure.test.check.generators :as gen]
@@ -128,7 +129,7 @@
     :requirement "column-name returns snake_case (no hyphens, lowercase)"
     :check (fn [{:keys [result]}]
              {:valid (and (not (re-find #"-" result))
-                          (= result (clojure.string/lower-case result)))
+                          (= result (str/lower-case result)))
               :result result})}
 
    :to-many-ref-requires-k->attr

@@ -9,8 +9,8 @@
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
-   [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.database-adapters.sql.save-form.invariants :as inv]
+   [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [com.fulcrologic.rad.form :as rad.form]
    [com.fulcrologic.rad.ids :as ids]
@@ -162,7 +162,7 @@
                 result (write/save-form! env params)
 
                 after-snapshot (inv/take-snapshot ds ["accounts"])
-                diff (inv/diff-snapshots before-snapshot after-snapshot)]
+                _diff (inv/diff-snapshots before-snapshot after-snapshot)]
 
             ;; Should have no new tempids for update
             (is (empty? (:tempids result)))
@@ -418,14 +418,14 @@
         (let [account-id (ids/new-uuid)]
           (sql/insert! ds :accounts {:id account-id :name "Alice"})
 
-          (let [before (inv/take-snapshot ds ["accounts"])
+          (let [_before (inv/take-snapshot ds ["accounts"])
                 ;; Delta where before = after (no change)
                 delta {[:account/id account-id] {:account/name {:before "Alice" :after "Alice"}}}
                 params {::rad.form/delta delta}
 
                 result (write/save-form! env params)
 
-                after (inv/take-snapshot ds ["accounts"])]
+                _after (inv/take-snapshot ds ["accounts"])]
 
             ;; No change should mean database unchanged
             ;; (Implementation may or may not issue UPDATE, but result should be same)
@@ -533,7 +533,7 @@
 (deftest test-oversized-string-rejected
   (testing "Strings exceeding column varchar limit throw wrapped save-error"
     (with-test-db
-      (fn [ds env]
+      (fn [_ds env]
         (let [;; Test schema has varchar(200) for name
               oversized-string (apply str (repeat 201 "x"))
               tempid (tempid/tempid)
@@ -553,7 +553,7 @@
 (deftest test-null-byte-rejected
   (testing "Null bytes in strings throw wrapped save-error"
     (with-test-db
-      (fn [ds env]
+      (fn [_ds env]
         (let [string-with-null "Before\u0000After"
               tempid (tempid/tempid)
               delta {[:account/id tempid]

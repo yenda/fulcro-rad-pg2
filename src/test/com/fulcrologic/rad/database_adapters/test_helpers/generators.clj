@@ -48,22 +48,22 @@
    "'; EXEC xp_cmdshell('dir'); --"])
 
 (def special-char-strings
-  ["O'Brien"                          ; Single quote
-   "John \"The Boss\" Smith"          ; Double quotes
-   "Line1\nLine2"                     ; Newline
-   "Tab\there"                        ; Tab
-   "Back\\slash"                      ; Backslash
-   "Semi;colon"                       ; Semicolon
-   "Percent%sign"                     ; SQL LIKE wildcard
-   "Under_score"                      ; SQL LIKE wildcard
-   "日本語テスト"                       ; Japanese
-   "Ümläüts"                          ; Umlauts
-   "🎉 Emoji 🚀"                       ; Emoji
+  ["O'Brien" ; Single quote
+   "John \"The Boss\" Smith" ; Double quotes
+   "Line1\nLine2" ; Newline
+   "Tab\there" ; Tab
+   "Back\\slash" ; Backslash
+   "Semi;colon" ; Semicolon
+   "Percent%sign" ; SQL LIKE wildcard
+   "Under_score" ; SQL LIKE wildcard
+   "日本語テスト" ; Japanese
+   "Ümläüts" ; Umlauts
+   "🎉 Emoji 🚀" ; Emoji
    "   leading spaces"
    "trailing spaces   "
    "  both  spaces  "
-   "foo\rbar"                         ; Carriage return
-   "a\u0001b"])                       ; Control character (not null)
+   "foo\rbar" ; Carriage return
+   "a\u0001b"]) ; Control character (not null)
 
 (defn boundary-strings
   "Generate boundary strings for a given max length"
@@ -81,13 +81,13 @@
 
 (def gen-nice-string
   "Generator for normal alphanumeric strings (1-50 chars)"
-  (gen/such-that #(and (not (empty? %)) (<= (count %) 50))
+  (gen/such-that #(and (seq %) (<= (count %) 50))
                  gen/string-alphanumeric
                  100))
 
 (def gen-string-value
   "Generator for string field values - mixes nice and nasty"
-  (gen/frequency [[7 gen-nice-string]   ; 70% normal strings
+  (gen/frequency [[7 gen-nice-string] ; 70% normal strings
                   [3 gen-nasty-string]])) ; 30% problematic strings
 
 (defn gen-string-with-max-length
@@ -208,8 +208,8 @@
    [[7 (gen/fmap (fn [[name domain]]
                    (str name "@" domain ".com"))
                  (gen/tuple gen-nice-string gen-nice-string))]
-    [1 (gen/return "")]                           ; Empty email
-    [1 (gen/return "not-an-email")]               ; Invalid format
+    [1 (gen/return "")] ; Empty email
+    [1 (gen/return "not-an-email")] ; Invalid format
     [1 (gen/return "test@evil.com'; DROP TABLE--")] ; SQL injection
     ]))
 
@@ -289,8 +289,8 @@
       :product/quantity {:after quantity}
       :product/sku {:after sku}
       :product/price {:after price}
-      :product/category {:after (str category)}  ; keywords stored as strings
-      :product/status {:after (str status)}      ; symbols stored as strings
+      :product/category {:after (str category)} ; keywords stored as strings
+      :product/status {:after (str status)} ; symbols stored as strings
       :product/api-key {:after api-key}}}))
 
 ;; =============================================================================

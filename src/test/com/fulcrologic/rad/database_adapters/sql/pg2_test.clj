@@ -165,7 +165,7 @@
              (transform {:status ":active" :name "Alice"})))))
 
   (testing "handles instant type"
-    (let [now (Instant/now)
+    (let [_now (Instant/now)
           odt (OffsetDateTime/now)
           transform (pg2/compile-pg2-row-transformer
                      {:created_at {:output-path [:user/created-at] :type :instant}})]

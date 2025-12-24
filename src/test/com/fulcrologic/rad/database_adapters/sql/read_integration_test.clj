@@ -10,7 +10,8 @@
 
    Uses Pathom3 lenient mode to allow nil results for missing entities."
   (:require
-   [clojure.test :refer [deftest is testing use-fixtures]]
+   [clojure.string :as str]
+   [clojure.test :refer [deftest is testing]]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
@@ -52,8 +53,8 @@
 (defn- split-sql-statements
   "Split a multi-statement SQL string into individual statements."
   [sql]
-  (->> (clojure.string/split sql #";\n")
-       (map clojure.string/trim)
+  (->> (str/split sql #";\n")
+       (map str/trim)
        (remove empty?)))
 
 (defn with-test-db
@@ -391,13 +392,12 @@
                                     ["INSERT INTO items (name, quantity, active) VALUES (?, ?, ?) RETURNING id"
                                      "Test Item" 50 true]
                                     jdbc-opts)
-              item-id (:id (first result))]
-
-          ;; Query via Pathom
-          (let [pathom-result (pathom-query env
-                                            [{[:item/id item-id]
-                                              [:item/id :item/name :item/quantity :item/active?]}])]
-            (is (= item-id (get-in pathom-result [[:item/id item-id] :item/id])))
-            (is (= "Test Item" (get-in pathom-result [[:item/id item-id] :item/name])))
-            (is (= 50 (get-in pathom-result [[:item/id item-id] :item/quantity])))
-            (is (= true (get-in pathom-result [[:item/id item-id] :item/active?])))))))))
+              item-id (:id (first result))
+              ;; Query via Pathom
+              pathom-result (pathom-query env
+                                          [{[:item/id item-id]
+                                            [:item/id :item/name :item/quantity :item/active?]}])]
+          (is (= item-id (get-in pathom-result [[:item/id item-id] :item/id])))
+          (is (= "Test Item" (get-in pathom-result [[:item/id item-id] :item/name])))
+          (is (= 50 (get-in pathom-result [[:item/id item-id] :item/quantity])))
+          (is (= true (get-in pathom-result [[:item/id item-id] :item/active?]))))))))

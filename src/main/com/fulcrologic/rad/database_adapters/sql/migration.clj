@@ -70,9 +70,9 @@
        [string? string? ::attr/attribute => map?]
        {:type :ref :table table :column column :attr attr})
 
-(defmulti op->sql (fn [k->attr adapter {:keys [type]}] type))
+(defmulti op->sql (fn [_k->attr _adapter {:keys [type]}] type))
 
-(defmethod op->sql :table [_ adapter {:keys [table]}] (format "CREATE TABLE IF NOT EXISTS %s ();\n" table))
+(defmethod op->sql :table [_ _adapter {:keys [table]}] (format "CREATE TABLE IF NOT EXISTS %s ();\n" table))
 
 (defmethod op->sql :ref [k->attr _ {:keys [table column attr]}]
   (let [{::attr/keys [cardinality target identities qualified-key]} attr
@@ -106,7 +106,7 @@
                  index-name table column))
         (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))))
 
-(defmethod op->sql :id [k->attr adapter {:keys [table column attr]}]
+(defmethod op->sql :id [_k->attr _adapter {:keys [table column attr]}]
   (let [{::attr/keys [type]} attr
         index-name (str table "_" column "_idx")
         sequence-name (str table "_" column "_seq")
@@ -122,11 +122,10 @@
      (format "CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s(%s);\n"
              index-name table column))))
 
-(defmethod op->sql :column [key->attr adapter {:keys [table column attr]}]
-  (let [{::attr/keys [type enumerated-values]} attr]
-    (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s;\n" table column (sql-type attr))))
+(defmethod op->sql :column [_key->attr _adapter {:keys [table column attr]}]
+  (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s;\n" table column (sql-type attr)))
 
-(defn attr->ops [schema-name key->attribute {::attr/keys [qualified-key type identity? identities]
+(defn attr->ops [schema-name key->attribute {::attr/keys [_qualified-key type identity? _identities]
                                              :keys [::attr/schema]
                                              :as attr}]
   (when (= schema schema-name)

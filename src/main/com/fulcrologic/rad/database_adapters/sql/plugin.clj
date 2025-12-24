@@ -2,7 +2,6 @@
   "RAD SQL plugin for pg2 PostgreSQL driver."
   (:require
    [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
-   [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as sql]
    [com.fulcrologic.rad.database-adapters.sql.write :as sql.write]
    [com.fulcrologic.rad.form :as form]
@@ -20,8 +19,8 @@
 
   - `::sql/connection-pools`: The result of the database-mapper.
   "
-  ([all-attributes database-mapper config] (wrap-env all-attributes nil database-mapper config))
-  ([all-attributes base-wrapper database-mapper config]
+  ([_all-attributes database-mapper config] (wrap-env _all-attributes nil database-mapper config))
+  ([_all-attributes base-wrapper database-mapper config]
    (let [database-configs (get config ::sql/databases)]
      (doseq [[k v] database-configs]
        (let [{:sql/keys [schema]} v]

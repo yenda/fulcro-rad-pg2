@@ -84,7 +84,7 @@
 
 (def gen-nice-string
   "Generator for normal alphanumeric strings"
-  (gen/such-that #(and (not (empty? %)) (<= (count %) 200))
+  (gen/such-that #(and (seq %) (<= (count %) 200))
                  gen/string-alphanumeric))
 
 (def gen-string-value
@@ -236,7 +236,7 @@
   "Property: Inserted data can be read back"
   [conn delta result]
   (every?
-   (fn [[[id-key id] fields]]
+   (fn [[[id-key id] _fields]]
      (when (tempid/tempid? id)
        (let [real-id (get (:tempids result) id)
              table-name (namespace id-key)]
@@ -253,7 +253,7 @@
 (defspec single-insert-resolves-tempids 50
   (prop/for-all [delta gen-single-insert-delta]
                 (with-test-db
-                  (fn [conn env]
+                  (fn [_conn env]
                     (let [result (write/save-form! env {::rad.form/delta delta})]
                       (and (prop-tempids-resolved delta result)
                            (prop-tempids-unique result)))))))
@@ -261,7 +261,7 @@
 (defspec multi-insert-resolves-all-tempids 30
   (prop/for-all [delta gen-multi-insert-delta]
                 (with-test-db
-                  (fn [conn env]
+                  (fn [_conn env]
                     (let [result (write/save-form! env {::rad.form/delta delta})]
                       (and (prop-tempids-resolved delta result)
                            (prop-tempids-unique result)))))))
@@ -528,7 +528,7 @@
 (defspec chaos-invalid-data-throws-save-error 30
   (prop/for-all [chaos-delta gen-chaos-delta]
                 (with-test-db
-                  (fn [conn env]
+                  (fn [_conn env]
                     (try
                       (write/save-form! env {::rad.form/delta chaos-delta})
                       false ;; Should have thrown - test fails if we get here
@@ -548,6 +548,6 @@
                            (string? (:message data))
                            ;; Must preserve original exception
                            (instance? org.postgresql.util.PSQLException (ex-cause e)))))
-                      (catch Exception e
+                      (catch Exception _e
                         ;; Wrong exception type - this is a bug
                         false))))))

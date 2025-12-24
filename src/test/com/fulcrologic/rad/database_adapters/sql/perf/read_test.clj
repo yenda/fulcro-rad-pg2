@@ -170,7 +170,7 @@
 
 (defn run-read-benchmarks
   "Run all read benchmarks and return results map."
-  [env {:keys [org-ids dept-ids emp-ids proj-ids task-ids]}]
+  [env {:keys [org-ids dept-ids emp-ids _proj-ids task-ids]}]
   (bench/print-header "READ BENCHMARKS - Pathom3 Resolvers")
 
   (let [opts {:iterations *benchmark-iterations* :warmup *benchmark-warmup*}
