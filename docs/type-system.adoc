@@ -88,7 +88,7 @@ When saving data, values flow through this pipeline:
 Fulcro Delta
     │
     ▼
-form->sql-value (resolvers.clj)
+form->sql-value (write.clj)
     ├─ :ref → extract ID from ident [table id] → id
     ├─ :enum → convert to string via (str value)
     ├─ custom ::sql/model->sql-value → apply transformer
@@ -101,10 +101,7 @@ HoneySQL map
 SQL string + parameters
     │
     ▼
-next.jdbc/execute!
-    │
-    ▼
-JDBC driver (Java → SQL type conversion)
+pg2/execute! (pg2.clj)
     │
     ▼
 PostgreSQL
@@ -114,7 +111,7 @@ PostgreSQL
 
 [source,clojure]
 ----
-;; From resolvers.clj
+;; From write.clj
 (defn form->sql-value [{::attr/keys [type cardinality]
                         ::rad.sql/keys [form->sql-value]} form-value]
   (cond
@@ -144,57 +141,19 @@ When reading data, values flow through this pipeline:
 PostgreSQL result set
     │
     ▼
-JDBC driver (SQL → Java type coercion)
-    │
-    ▼
-RAD-column-reader (query.clj)
-    ├─ JSON column → jsonista/read-value
-    ├─ CLOB column → convert to string
-    ├─ TIMESTAMP → java.sql.Timestamp
-    └─ else → .getObject (default JDBC handling)
-    │
-    ▼
-ReadableColumn protocol extensions (result_set.clj)
-    └─ Array → Clojure vector
+pg2 driver (pg2.clj)
+    ├─ Native PostgreSQL types handled by pg2
+    ├─ JSON/JSONB → Clojure maps
+    ├─ Arrays → Clojure vectors
+    └─ Timestamps → java.time types
     │
     ▼
 Clojure map (kebab-case keys)
 ----
 
-==== RAD Column Reader
+==== pg2 Type Handling
 
-[source,clojure]
-----
-;; From query.clj
-(defn RAD-column-reader
-  [^ResultSet rs ^ResultSetMetaData md ^Integer i]
-  (let [col-type (.getColumnType md i)
-        col-type-name (.getColumnTypeName md i)]
-    (cond
-      (= col-type-name "JSON")
-      (j/read-value (.getObject rs i))
-
-      (= col-type Types/CLOB)
-      (rs/clob->string (.getClob rs i))
-
-      (#{Types/TIMESTAMP Types/TIMESTAMP_WITH_TIMEZONE} col-type)
-      (.getTimestamp rs i)
-
-      :else
-      (.getObject rs i))))
-----
-
-==== ReadableColumn Extensions
-
-[source,clojure]
-----
-;; From result_set.clj
-(defn coerce-result-sets! []
-  (extend-protocol jdbc.rs/ReadableColumn
-    Array
-    (read-column-by-label [v _] (vec (.getArray v)))
-    (read-column-by-index [v _ _] (vec (.getArray v)))))
-----
+The pg2 driver handles PostgreSQL types natively without JDBC protocol extensions. Type transformations are configured via `pg2/build-pool-config` which sets up appropriate encoders and decoders for PostgreSQL-specific types.
 
 === Pipeline Asymmetry
 
@@ -306,50 +265,9 @@ This approach:
 * No database schema changes needed
 * Recommended for custom types like JSON, EDN, or encrypted values
 
-=== Secondary Extension: ReadableColumn Protocol
+=== Secondary Extension: pg2 Type Configuration
 
-For JDBC-level type handling, extend the `ReadableColumn` protocol:
-
-[source,clojure]
-----
-(extend-protocol jdbc.rs/ReadableColumn
-  org.postgresql.util.PGobject
-  (read-column-by-label [v _]
-    (let [type (.getType v)
-          value (.getValue v)]
-      (case type
-        "jsonb" (j/read-value value)
-        "json" (j/read-value value)
-        v)))
-  (read-column-by-index [v _ _]
-    (read-column-by-label v nil)))
-----
-
-This approach:
-
-* Handles PostgreSQL-specific types at the JDBC level
-* Useful for native JSONB, arrays, or geometric types
-* Requires protocol extension in your application startup
-
-=== Tertiary Extension: Custom Column Reader
-
-Create a custom column reader for full control:
-
-[source,clojure]
-----
-(defn custom-column-reader
-  [^ResultSet rs ^ResultSetMetaData md ^Integer i]
-  (let [col-type (.getColumnType md i)
-        col-type-name (.getColumnTypeName md i)]
-    (case col-type-name
-      "JSONB" (j/read-value (.getObject rs i))
-      "TEXT" (.getString rs i)
-      ;; Fall back to default
-      (.getObject rs i))))
-
-(def custom-row-builder
-  (rs/as-maps-adapter rs/as-unqualified-kebab-maps custom-column-reader))
-----
+The pg2 driver handles PostgreSQL types natively. Type transformations are configured in the pool configuration via `build-pool-config` in `pg2.clj`. Custom types can be handled by configuring pg2's encoder/decoder system.
 
 === Limitations
 
@@ -426,7 +344,7 @@ PostgreSQL enforces type constraints. Errors are caught and wrapped:
 
 [source,clojure]
 ----
-;; From resolvers.clj
+;; From write.clj
 (defn error-condition [^PSQLException e]
   (case (.getSQLState e)
     "22001" ::string-data-too-long      ;; VARCHAR length exceeded
@@ -494,14 +412,14 @@ PostgreSQL enforces type constraints. Errors are caught and wrapped:
 ┌───────────────────┐                    ┌───────────────────┐
 │   WRITE PATH      │                    │    READ PATH      │
 │                   │                    │                   │
-│ form->sql-value   │                    │ RAD-column-reader │
-│ (auto-applied)    │                    │ ReadableColumn    │
-│       │           │                    │ (auto-applied)    │
-│       ▼           │                    │       │           │
-│ HoneySQL → SQL    │                    │       ▼           │
-│       │           │                    │ sql->model-value  │
-│       ▼           │                    │ (NOT auto-applied)│
-│ JDBC → PostgreSQL │                    │                   │
+│ form->sql-value   │                    │ pg2 native types  │
+│ (auto-applied)    │                    │ (auto-applied)    │
+│       │           │                    │       │           │
+│       ▼           │                    │       ▼           │
+│ HoneySQL → SQL    │                    │ sql->model-value  │
+│       │           │                    │ (NOT auto-applied)│
+│       ▼           │                    │                   │
+│ pg2 → PostgreSQL  │                    │                   │
 └───────────────────┘                    └───────────────────┘
                               │
                               ▼

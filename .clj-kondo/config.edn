@@ -17,18 +17,12 @@
  {com.fulcrologic.rad.database-adapters.sql.migration
   {:linters {:unresolved-symbol {:level :off}
              :format {:level :off}}}
-  com.fulcrologic.rad.database-adapters.sql.connection
-  {:linters {:unresolved-symbol {:level :off}}}
   com.fulcrologic.rad.database-adapters.sql.schema
   {:linters {:unresolved-symbol {:level :off}
              :invalid-arity {:level :off}
              :inline-def {:level :off}
              :clj-kondo.fulcro.>defn/signature-mismatch {:level :off}}}
-  com.fulcrologic.rad.database-adapters.sql.query
-  {:linters {:unresolved-symbol {:level :off}}}
   com.fulcrologic.rad.database-adapters.sql.plugin
-  {:linters {:invalid-arity {:level :off}}}
-  com.fulcrologic.rad.database-adapters.sql.resolvers-test
   {:linters {:invalid-arity {:level :off}}}
   ;; Test namespaces with defproperty macro
   com.fulcrologic.rad.database-adapters.sql.schema-test
