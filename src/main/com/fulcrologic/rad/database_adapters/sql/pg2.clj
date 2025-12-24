@@ -123,21 +123,25 @@
       (decoder value)
       value)))
 
-(defn- pg2-decode-value
-  "Decode a pg2 native value based on RAD type."
-  [rad-type value]
-  (when (some? value)
-    (case rad-type
-      (:keyword :enum) (sql-string->keyword value)
-      :symbol (sql-string->symbol value)
-      :instant (timestamp->instant value)
-      value)))
+(defn get-decoder
+  "Get the decoder function for a RAD type. Returns nil if no decoding needed.
+   Called at generation time to pre-resolve decoders."
+  [rad-type]
+  (case rad-type
+    (:keyword :enum) sql-string->keyword
+    :symbol sql-string->symbol
+    :instant timestamp->instant
+    nil))
 
 (defn compile-pg2-row-transformer
   "Compile a function that transforms pg2 raw output directly to resolver format.
 
    This is the zero-copy fast path for pg2. Combines column name mapping
    and type transformation in a single pass.
+
+   Optimizations applied at compile time:
+   - Decoder functions pre-resolved (no case statement at runtime)
+   - Single-key paths use direct assoc instead of assoc-in
 
    Arguments:
      column-config - Map of database column keywords to config:
@@ -146,14 +150,23 @@
                       :status     {:output-path [:message/status]
                                    :type :enum}}"
   [column-config]
-  (let [entries (vec column-config)]
+  ;; Pre-process: resolve decoders and mark simple paths
+  (let [entries (mapv (fn [[col {:keys [output-path type]}]]
+                        {:col col
+                         :output-path output-path
+                         :output-key (first output-path)
+                         :simple? (= 1 (count output-path))
+                         :decoder (get-decoder type)})
+                      column-config)]
     (fn transform-row [raw-row]
       (reduce
-       (fn [acc [col {:keys [output-path type]}]]
-         (let [v (get raw-row col)]
-           (if (some? v)
-             (assoc-in acc output-path (pg2-decode-value type v))
-             acc)))
+       (fn [acc {:keys [col output-path output-key simple? decoder]}]
+         (if-some [v (get raw-row col)]
+           (let [decoded (if decoder (decoder v) v)]
+             (if simple?
+               (assoc acc output-key decoded)
+               (assoc-in acc output-path decoded)))
+           acc))
        {}
        entries))))
 

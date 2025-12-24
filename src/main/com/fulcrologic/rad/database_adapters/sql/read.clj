@@ -145,7 +145,9 @@
    Returns a Pathom3 resolver that:
    - Takes a vector of entity IDs as input
    - Executes a single batch SQL query with = ANY($1::type[])
-   - Returns results in the same order as input IDs (nil for missing)"
+   - Returns results in the same order as input IDs (nil for missing)
+
+   Optimization: ID extracted directly from raw row (avoids lookup in transformed result)"
   [{::attr/keys [id-attr id-attr->attributes k->attr]}]
   (let [id-attr-k (::attr/qualified-key id-attr)
         column->outputs (get-column->outputs id-attr-k id-attr->attributes k->attr false)
@@ -156,7 +158,7 @@
         outputs (into [] cat (vals column->outputs))
         columns (keys column->outputs)
         table (get-table id-attr)
-        id-column (get-column id-attr)
+        id-column (get-column id-attr)  ;; Captured at generation time for direct extraction
         pg2-prepared-sql (format "SELECT %s FROM %s WHERE %s = ANY($1::%s)"
                                  (str/join ", " (map name columns))
                                  (name table)
@@ -183,10 +185,12 @@
                     "id-resolver"
                     (let [pool (get-pool env schema)
                           rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                          ;; Extract ID directly from raw row
                           results-by-id (reduce
                                          (fn [acc row]
-                                           (let [result (pg2-transform-row row)]
-                                             (assoc acc (id-attr-k result) result)))
+                                           (let [id (get row id-column)
+                                                 result (pg2-transform-row row)]
+                                             (assoc acc id result)))
                                          {}
                                          rows)]
                       (auth/redact env (mapv results-by-id ids)))
@@ -240,6 +244,8 @@
                                    (name relationship-column)
                                    (get-pg-array-type id-attr)
                                    (name relationship-column))
+          ;; Pre-build the wrapper function at generation time
+          wrap-targets (fn [targets] {attr-k (mapv (fn [t] {target-k t}) targets)})
           entity-by-attribute-resolver
           (pco/resolver
            op-name
@@ -254,10 +260,7 @@
                            (let [pool (get-pool env schema)
                                  rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
                                  results-by-id (reduce (fn [acc {:keys [k v]}]
-                                                         (assoc acc k
-                                                                {attr-k (mapv (fn [v]
-                                                                                {target-k v})
-                                                                              v)}))
+                                                         (assoc acc k (wrap-targets v)))
                                                        {}
                                                        rows)]
                              (auth/redact env (mapv results-by-id ids)))
@@ -273,7 +276,9 @@
   "Generate a resolver for to-one references.
    Two cases:
    1. Forward ref (no ::rad.sql/ref): Source table has FK column, use alias resolver
-   2. Reverse ref (has ::rad.sql/ref): Target table has FK, generate batch resolver"
+   2. Reverse ref (has ::rad.sql/ref): Target table has FK, generate batch resolver
+
+   Optimization: FK ID extracted directly from raw row (avoids lookup in transformed result)"
   [{::attr/keys [schema]
     ::pco/keys [transform]
     ::rad.sql/keys [ref]
@@ -297,7 +302,7 @@
           outputs (into [] cat (vals column->outputs))
           columns (keys column->outputs)
           table (get-table target-attr)
-          ref-column (get-column ref-attr)
+          ref-column (get-column ref-attr)  ;; Captured for direct extraction from raw row
           id-attr (k->attr id-attr-k)
           pg2-prepared-sql (format "SELECT %s FROM %s WHERE %s = ANY($1::%s)"
                                    (str/join ", " (map name columns))
@@ -321,10 +326,12 @@
                     "to-one-resolver"
                     (let [pool (get-pool env schema)
                           rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
+                          ;; Extract FK directly from raw row
                           results-by-id (reduce
                                          (fn [acc row]
-                                           (let [result (pg2-transform-row row)]
-                                             (assoc acc (get-in result [ref id-attr-k]) result)))
+                                           (let [fk-id (get row ref-column)
+                                                 result (pg2-transform-row row)]
+                                             (assoc acc fk-id result)))
                                          {}
                                          rows)]
                       ;; Return nil for missing entities - Pathom3 batch semantics
