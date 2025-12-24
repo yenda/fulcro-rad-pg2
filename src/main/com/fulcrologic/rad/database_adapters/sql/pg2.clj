@@ -162,3 +162,24 @@
   (pool/with-conn [conn pool]
     (let [pg2-sql (convert-params sql)]
       (pg/execute conn pg2-sql {:params (vec params)}))))
+
+(defn pg2-query-prepared!
+  "Execute a pre-compiled SQL query with array parameter.
+
+   This function is optimized for prepared statement caching:
+   - Takes a static SQL string (no HoneySQL formatting at query time)
+   - Uses array parameter syntax ($1::type[]) for variable-length ID lists
+   - Ensures 100% prepared statement cache hit rate regardless of batch size
+
+   Arguments:
+     pool       - pg2 connection pool
+     sql        - Pre-compiled SQL string with $1::type[] syntax
+     ids        - Collection of IDs to pass as array parameter
+
+   Example:
+     (pg2-query-prepared! pool
+       \"SELECT * FROM users WHERE id = ANY($1::uuid[])\"
+       [uuid1 uuid2 uuid3])"
+  [pool sql ids]
+  (pool/with-conn [conn pool]
+    (pg/execute conn sql {:params [(vec ids)]})))
