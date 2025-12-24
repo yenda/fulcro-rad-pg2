@@ -13,12 +13,12 @@
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
    [com.fulcrologic.rad.database-adapters.sql.perf.attributes :as perf-attrs]
    [com.fulcrologic.rad.database-adapters.sql.perf.benchmark :as bench]
-   [com.fulcrologic.rad.database-adapters.sql.resolvers :as resolvers]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+   [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
    [com.fulcrologic.rad.ids :as ids]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
+   [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
 ;; =============================================================================
@@ -27,6 +27,13 @@
 
 (def test-db-config
   {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
+
+(def pg2-config
+  {:host "localhost"
+   :port 5432
+   :user "user"
+   :password "password"
+   :database "fulcro-rad-pg2"})
 
 (def key->attribute (enc/keys-by ::attr/qualified-key perf-attrs/all-attributes))
 
@@ -48,20 +55,24 @@
   [f]
   (let [ds (jdbc/get-datasource test-db-config)
         schema-name (generate-test-schema-name)
-        conn (jdbc/get-connection ds)]
+        jdbc-conn (jdbc/get-connection ds)
+        ;; Create pg2 pool with search_path set to test schema
+        pg2-pool (pg.pool/pool (assoc pg2-config
+                                      :pg-params {"search_path" schema-name}))]
     (try
-      (jdbc/execute! conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! conn [(str "SET search_path TO " schema-name)])
-      (doseq [s (mig/automatic-schema :perf (vendor/->PostgreSQLAdapter) perf-attrs/all-attributes)]
-        (jdbc/execute! conn [s]))
+      ;; Use JDBC for schema setup (simpler for DDL)
+      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
+      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
+      (doseq [s (mig/automatic-schema :perf perf-attrs/all-attributes)]
+        (jdbc/execute! jdbc-conn [s]))
+      ;; Use pg2 pool for actual benchmarks
       (let [env {::attr/key->attribute key->attribute
-                 ::rad.sql/connection-pools {:perf conn}
-                 ::rad.sql/adapters {:perf (vendor/->PostgreSQLAdapter)}
-                 ::rad.sql/default-adapter (vendor/->PostgreSQLAdapter)}]
-        (f conn env))
+                 ::rad.sql/connection-pools {:perf pg2-pool}}]
+        (f jdbc-conn env))
       (finally
-        (jdbc/execute! conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close conn)))))
+        (pg.pool/close pg2-pool)
+        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
+        (.close jdbc-conn)))))
 
 (defn clear-tables!
   "Clear all tables for next benchmark iteration."
@@ -297,15 +308,15 @@
 
     (swap! results assoc :simple-insert
            (bench/benchmark! "Single entity insert"
-                             #(resolvers/save-form! env {::rad.form/delta (make-simple-insert-delta)})
+                             #(write/save-form! env {::rad.form/delta (make-simple-insert-delta)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     ;; For update test, we need an existing entity
-    (let [setup-result (resolvers/save-form! env {::rad.form/delta (make-simple-insert-delta)})
+    (let [setup-result (write/save-form! env {::rad.form/delta (make-simple-insert-delta)})
           existing-id (first (vals (:tempids setup-result)))]
       (swap! results assoc :simple-update
              (bench/benchmark! "Single field update"
-                               #(resolvers/save-form! env {::rad.form/delta (make-simple-update-delta existing-id)})
+                               #(write/save-form! env {::rad.form/delta (make-simple-update-delta existing-id)})
                                opts)))
     (clear-tables! conn)
 
@@ -314,7 +325,7 @@
 
     (swap! results assoc :medium-insert
            (bench/benchmark! "Entity with to-one refs (4 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-medium-insert-delta)})
+                             #(write/save-form! env {::rad.form/delta (make-medium-insert-delta)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     ;; === HIERARCHIES ===
@@ -322,17 +333,17 @@
 
     (swap! results assoc :hierarchy-5-tasks
            (bench/benchmark! "4-level hierarchy (5 tasks)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-complex-hierarchy-delta 5)})
+                             #(write/save-form! env {::rad.form/delta (make-complex-hierarchy-delta 5)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :hierarchy-20-tasks
            (bench/benchmark! "4-level hierarchy (20 tasks)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-complex-hierarchy-delta 20)})
+                             #(write/save-form! env {::rad.form/delta (make-complex-hierarchy-delta 20)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :hierarchy-50-tasks
            (bench/benchmark! "4-level hierarchy (50 tasks)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-complex-hierarchy-delta 50)})
+                             #(write/save-form! env {::rad.form/delta (make-complex-hierarchy-delta 50)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     ;; === BATCH INSERTS ===
@@ -340,17 +351,17 @@
 
     (swap! results assoc :batch-10
            (bench/benchmark! "Batch 10 simple entities"
-                             #(resolvers/save-form! env {::rad.form/delta (make-batch-insert-delta 10)})
+                             #(write/save-form! env {::rad.form/delta (make-batch-insert-delta 10)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :batch-50
            (bench/benchmark! "Batch 50 simple entities"
-                             #(resolvers/save-form! env {::rad.form/delta (make-batch-insert-delta 50)})
+                             #(write/save-form! env {::rad.form/delta (make-batch-insert-delta 50)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :batch-100
            (bench/benchmark! "Batch 100 simple entities"
-                             #(resolvers/save-form! env {::rad.form/delta (make-batch-insert-delta 100)})
+                             #(write/save-form! env {::rad.form/delta (make-batch-insert-delta 100)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     ;; === BATCH WITH REFS ===
@@ -358,17 +369,17 @@
 
     (swap! results assoc :batch-refs-10
            (bench/benchmark! "Batch 10 employees + addresses (22 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-batch-with-refs-delta 10)})
+                             #(write/save-form! env {::rad.form/delta (make-batch-with-refs-delta 10)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :batch-refs-25
            (bench/benchmark! "Batch 25 employees + addresses (52 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-batch-with-refs-delta 25)})
+                             #(write/save-form! env {::rad.form/delta (make-batch-with-refs-delta 25)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :batch-refs-50
            (bench/benchmark! "Batch 50 employees + addresses (102 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-batch-with-refs-delta 50)})
+                             #(write/save-form! env {::rad.form/delta (make-batch-with-refs-delta 50)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     ;; === MIXED OPERATIONS ===
@@ -376,16 +387,16 @@
 
     ;; Setup: create entities to update/delete
     (let [setup-delta (make-batch-insert-delta 20)
-          setup-result (resolvers/save-form! env {::rad.form/delta setup-delta})
+          setup-result (write/save-form! env {::rad.form/delta setup-delta})
           all-ids (vec (vals (:tempids setup-result)))
           update-ids (take 10 all-ids)
           delete-ids (drop 10 all-ids)]
 
       (swap! results assoc :mixed-ops
              (bench/benchmark! "1 insert + 10 updates + 10 deletes"
-                               #(resolvers/save-form! env {::rad.form/delta
-                                                           (make-mixed-operations-delta
-                                                            {:update-ids update-ids :delete-ids delete-ids})})
+                               #(write/save-form! env {::rad.form/delta
+                                                       (make-mixed-operations-delta
+                                                        {:update-ids update-ids :delete-ids delete-ids})})
                                opts)))
     (clear-tables! conn)
 
@@ -394,17 +405,17 @@
 
     (swap! results assoc :self-ref-small
            (bench/benchmark! "5 parents x 2 children (13 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-self-ref-delta 5 2)})
+                             #(write/save-form! env {::rad.form/delta (make-self-ref-delta 5 2)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :self-ref-medium
            (bench/benchmark! "10 parents x 5 children (53 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-self-ref-delta 10 5)})
+                             #(write/save-form! env {::rad.form/delta (make-self-ref-delta 10 5)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     (swap! results assoc :self-ref-large
            (bench/benchmark! "20 parents x 10 children (203 entities)"
-                             #(resolvers/save-form! env {::rad.form/delta (make-self-ref-delta 20 10)})
+                             #(write/save-form! env {::rad.form/delta (make-self-ref-delta 20 10)})
                              (assoc opts :teardown #(clear-tables! conn))))
 
     @results))

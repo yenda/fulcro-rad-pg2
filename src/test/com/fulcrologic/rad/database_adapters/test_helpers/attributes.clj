@@ -276,6 +276,64 @@
 (def metadata-attributes [metadata-id metadata-author metadata-version metadata-document])
 
 ;; =============================================================================
+;; Item - demonstrates :long identity with sequence-based ID generation
+;; =============================================================================
+
+(defattr item-id :item/id :long
+  {::rad.attr/identity? true
+   ::rad.attr/schema :production
+   ::rad.sql/table "items"})
+
+(defattr item-name :item/name :string
+  {::rad.attr/schema :production
+   ::rad.attr/identities #{:item/id}
+   ::rad.sql/max-length 200})
+
+(defattr item-quantity :item/quantity :int
+  {::rad.attr/schema :production
+   ::rad.attr/identities #{:item/id}})
+
+(defattr item-active :item/active? :boolean
+  {::rad.attr/schema :production
+   ::rad.attr/identities #{:item/id}
+   ::rad.sql/column-name "active"})
+
+;; To-one ref from item to account (item has FK to account)
+(defattr item-owner :item/owner :ref
+  {::rad.attr/cardinality :one
+   ::rad.attr/target :account/id
+   ::rad.attr/schema :production
+   ::rad.attr/identities #{:item/id}})
+
+(def item-attributes [item-id item-name item-quantity item-active item-owner])
+
+;; =============================================================================
+;; LineItem - another :long identity entity for batch ID generation testing
+;; =============================================================================
+
+(defattr line-item-id :line-item/id :long
+  {::rad.attr/identity? true
+   ::rad.attr/schema :production
+   ::rad.sql/table "line_items"})
+
+(defattr line-item-description :line-item/description :string
+  {::rad.attr/schema :production
+   ::rad.attr/identities #{:line-item/id}})
+
+(defattr line-item-amount :line-item/amount :int
+  {::rad.attr/schema :production
+   ::rad.attr/identities #{:line-item/id}})
+
+;; Ref to item (for testing cross-entity tempid resolution with int IDs)
+(defattr line-item-item :line-item/item :ref
+  {::rad.attr/cardinality :one
+   ::rad.attr/target :item/id
+   ::rad.attr/schema :production
+   ::rad.attr/identities #{:line-item/id}})
+
+(def line-item-attributes [line-item-id line-item-description line-item-amount line-item-item])
+
+;; =============================================================================
 ;; All Attributes
 ;; =============================================================================
 
@@ -287,4 +345,6 @@
           event-attributes
           category-attributes
           document-attributes
-          metadata-attributes))
+          metadata-attributes
+          item-attributes
+          line-item-attributes))

@@ -12,18 +12,14 @@
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
    [com.fulcrologic.rad.database-adapters.sql.perf.attributes :as perf-attrs]
    [com.fulcrologic.rad.database-adapters.sql.perf.benchmark :as bench]
-   [com.fulcrologic.rad.database-adapters.sql.resolvers-pathom3 :as resolvers-p3]
-   [com.fulcrologic.rad.database-adapters.sql.result-set :as sql.rs]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+   [com.fulcrologic.rad.database-adapters.sql.read :as read]
    [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.interface.eql :as p.eql]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
+   [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
-
-;; Initialize result set coercion for PostgreSQL arrays
-(sql.rs/coerce-result-sets!)
 
 ;; =============================================================================
 ;; Configuration
@@ -31,6 +27,13 @@
 
 (def test-db-config
   {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
+
+(def pg2-config
+  {:host "localhost"
+   :port 5432
+   :user "user"
+   :password "password"
+   :database "fulcro-rad-pg2"})
 
 (def key->attribute (enc/keys-by ::attr/qualified-key perf-attrs/all-attributes))
 
@@ -133,23 +136,26 @@
   [f]
   (let [ds (jdbc/get-datasource test-db-config)
         schema-name (generate-test-schema-name)
-        conn (jdbc/get-connection ds)]
+        jdbc-conn (jdbc/get-connection ds)
+        ;; Create pg2 pool with search_path set to test schema
+        pg2-pool (pg.pool/pool (assoc pg2-config
+                                      :pg-params {"search_path" schema-name}))]
     (try
-      (jdbc/execute! conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! conn [(str "SET search_path TO " schema-name)])
-      (doseq [s (mig/automatic-schema :perf (vendor/->PostgreSQLAdapter) perf-attrs/all-attributes)]
-        (jdbc/execute! conn [s]))
-      (let [entity-ids (seed-test-data! conn)
-            resolvers (resolvers-p3/generate-resolvers perf-attrs/all-attributes :perf)
+      ;; Use JDBC for schema setup and seeding (simpler for DDL)
+      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
+      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
+      (doseq [s (mig/automatic-schema :perf perf-attrs/all-attributes)]
+        (jdbc/execute! jdbc-conn [s]))
+      (let [entity-ids (seed-test-data! jdbc-conn)
+            resolvers (read/generate-resolvers perf-attrs/all-attributes :perf)
             pathom-env (-> (pci/register resolvers)
                            (assoc ::attr/key->attribute key->attribute
-                                  ::rad.sql/connection-pools {:perf conn}
-                                  ::rad.sql/adapters {:perf (vendor/->PostgreSQLAdapter)}
-                                  ::rad.sql/default-adapter (vendor/->PostgreSQLAdapter)))]
-        (f conn pathom-env entity-ids))
+                                  ::rad.sql/connection-pools {:perf pg2-pool}))]
+        (f jdbc-conn pathom-env entity-ids))
       (finally
-        (jdbc/execute! conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close conn)))))
+        (pg.pool/close pg2-pool)
+        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
+        (.close jdbc-conn)))))
 
 ;; =============================================================================
 ;; Query Helper

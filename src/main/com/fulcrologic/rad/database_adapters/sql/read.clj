@@ -1,16 +1,18 @@
-(ns com.fulcrologic.rad.database-adapters.sql.resolvers-pathom3
-  "Pathom3 resolvers for pg2 PostgreSQL driver."
+(ns com.fulcrologic.rad.database-adapters.sql.read
+  "Pathom3 read resolvers for pg2 PostgreSQL driver."
   (:require
    [clojure.string :as str]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.authorization :as auth]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-   [com.fulcrologic.rad.database-adapters.sql.malli-transform :as mt]
    [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.wsscode.pathom3.connect.built-in.resolvers :as pbir]
    [com.wsscode.pathom3.connect.operation :as pco]
    [taoensso.encore :as enc]
    [taoensso.timbre :as log]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Column/Table Helpers
 
 (defn get-column [attribute]
   (let [col (or (::rad.sql/column-name attribute)
@@ -32,7 +34,6 @@
     :int "int4[]"
     :long "int8[]"
     :string "text[]"
-    ;; Default to text[] which PostgreSQL can often coerce
     "text[]"))
 
 (defn to-one-keyword [qualified-key]
@@ -40,6 +41,9 @@
                 "/"
                 (name qualified-key)
                 "-id")))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Column Mapping
 
 (defn get-column->outputs
   [id-attr-k id-attr->attributes k->attr target?]
@@ -81,9 +85,7 @@
 
 (defn build-pg2-column-config
   "Build the configuration for pg2 zero-copy row transformation.
-
-   Maps pg2 column keywords (e.g., :created_at) directly to output paths
-   and types, enabling single-pass transformation."
+   Maps pg2 column keywords directly to output paths and types."
   [column-mapping column->attr]
   (reduce
    (fn [acc [output-path column]]
@@ -94,20 +96,20 @@
    {}
    column-mapping))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ID Resolver
+
 (defn id-resolver [{::attr/keys [id-attr id-attr->attributes attributes k->attr] :as c}]
   (let [id-attr-k (::attr/qualified-key id-attr)
         column->outputs (get-column->outputs id-attr-k id-attr->attributes k->attr false)
         column-mapping (get-column-mapping column->outputs)
         column->attr (get-column->attr id-attr id-attr->attributes k->attr)
-        ;; pg2 zero-copy: compile transformer that goes directly from pg2 raw -> resolver output
         pg2-column-config (build-pg2-column-config column-mapping column->attr)
-        pg2-transform-row (mt/compile-pg2-row-transformer pg2-column-config)
+        pg2-transform-row (pg2/compile-pg2-row-transformer pg2-column-config)
         outputs (vec (flatten (vals column->outputs)))
         columns (keys column->outputs)
         table (get-table id-attr)
         id-column (get-column id-attr)
-        ;; pg2 prepared statement: pre-compile SQL at resolver generation time
-        ;; Uses = ANY($1::type[]) for 100% prepared statement cache hit rate
         pg2-prepared-sql (format "SELECT %s FROM %s WHERE %s = ANY($1::%s)"
                                  (str/join ", " (map name columns))
                                  (name table)
@@ -146,6 +148,9 @@
              transform (assoc ::pco/transform transform)))]
       id-resolver)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; To-Many Resolver
+
 (defn to-many-resolvers
   [{::attr/keys [schema]
     ::rad.sql/keys [ref]
@@ -175,7 +180,6 @@
           order-by (some-> (::rad.sql/order-by attr)
                            k->attr
                            get-column)
-          ;; pg2 prepared statement: pre-compile SQL at resolver generation time
           id-attr (k->attr id-attr-k)
           pg2-prepared-sql (format "SELECT %s AS k, array_agg(%s%s) AS v FROM %s WHERE %s = ANY($1::%s) GROUP BY %s"
                                    (name relationship-column)
@@ -211,6 +215,9 @@
              transform (assoc ::pco/transform transform)))]
       entity-by-attribute-resolver)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; To-One Resolver
+
 (defn to-one-resolvers [{::attr/keys [schema]
                          ::pco/keys [transform] :as attr
                          ::rad.sql/keys [ref]
@@ -220,10 +227,8 @@
                         id-attr->attributes
                         k->attr]
   (if-not ref
-    ;; when there is no ref that means that the table has a
-    ;; column with the ref.
-    ;; so we only need to alias that ref attribute to reuse
-    ;; the id-resolver of the ref entity.
+    ;; When there is no ref, the table has a column with the ref.
+    ;; Alias that ref attribute to reuse the id-resolver of the ref entity.
     (pbir/alias-resolver (to-one-keyword attr-k) target-k)
     (let [{::attr/keys [schema]
            ::pco/keys [transform]} attr
@@ -232,14 +237,12 @@
           column->outputs (get-column->outputs target-k id-attr->attributes k->attr true)
           column-mapping (get-column-mapping column->outputs)
           column->attr (get-column->attr target-attr id-attr->attributes k->attr)
-          ;; pg2 zero-copy: compile transformer that goes directly from pg2 raw -> resolver output
           pg2-column-config (build-pg2-column-config column-mapping column->attr)
-          pg2-transform-row (mt/compile-pg2-row-transformer pg2-column-config)
+          pg2-transform-row (pg2/compile-pg2-row-transformer pg2-column-config)
           outputs (vec (flatten (vals column->outputs)))
           columns (keys column->outputs)
           table (get-table target-attr)
           ref-column (get-column ref-attr)
-          ;; pg2 prepared statement: pre-compile SQL at resolver generation time
           id-attr (k->attr id-attr-k)
           pg2-prepared-sql (format "SELECT %s FROM %s WHERE %s = ANY($1::%s)"
                                    (str/join ", " (map name columns))
@@ -278,9 +281,11 @@
              transform (assoc ::pco/transform transform)))]
       one-to-one-resolver)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Resolver Generation
+
 (defn generate-resolvers
-  "Returns a sequence of resolvers that can resolve attributes from
-  SQL databases."
+  "Returns a sequence of resolvers that can resolve attributes from SQL databases."
   [attributes schema]
   (log/info "Generating resolvers for SQL schema" schema)
   (let [k->attr (enc/keys-by ::attr/qualified-key attributes)

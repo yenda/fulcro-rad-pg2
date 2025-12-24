@@ -4,9 +4,12 @@
    [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as sql]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
-   [taoensso.encore :as enc]
+   [com.fulcrologic.rad.database-adapters.sql.write :as sql.write]
+   [com.fulcrologic.rad.form :as form]
    [taoensso.timbre :as log]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Pathom Environment
 
 (defn wrap-env
   "Env middleware to add the necessary SQL connections and databases to the pathom env for
@@ -19,21 +22,13 @@
   "
   ([all-attributes database-mapper config] (wrap-env all-attributes nil database-mapper config))
   ([all-attributes base-wrapper database-mapper config]
-   (let [database-configs (get config ::sql/databases)
-         default-adapter (vendor/->PostgreSQLAdapter)
-         vendor-adapters (reduce-kv
-                          (fn [acc k v]
-                            (let [{:sql/keys [schema]} v]
-                              (log/info k "using PostgreSQL Adapter for schema" schema)
-                              (assoc acc schema (vendor/->PostgreSQLAdapter))))
-                          {}
-                          database-configs)]
+   (let [database-configs (get config ::sql/databases)]
+     (doseq [[k v] database-configs]
+       (let [{:sql/keys [schema]} v]
+         (log/info k "using pg2 PostgreSQL driver for schema" schema)))
      (fn [env]
        (cond-> (let [database-connection-map (database-mapper env)]
-                 (assoc env
-                        ::sql/default-adapter default-adapter
-                        ::sql/adapters vendor-adapters
-                        ::sql/connection-pools database-connection-map))
+                 (assoc env ::sql/connection-pools database-connection-map))
          base-wrapper (base-wrapper))))))
 
 (defn pathom-plugin
@@ -53,8 +48,23 @@
   ([database-mapper]
    (pathom-plugin database-mapper {}))
   ([database-mapper config]
-   (let [augment (wrap-env database-mapper config)]
+   (let [augment (wrap-env nil nil database-mapper config)]
      {:com.wsscode.pathom.core/wrap-parser
       (fn env-wrap-wrap-parser [parser]
         (fn env-wrap-wrap-internal [env tx]
           (parser (augment env) tx)))})))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Form Middleware
+
+(defn wrap-sql-save
+  "Form save middleware to accomplish SQL saves."
+  ([]
+   (fn [{::form/keys [params] :as pathom-env}]
+     (let [save-result (sql.write/save-form! pathom-env params)]
+       save-result)))
+  ([handler]
+   (fn [{::form/keys [params] :as pathom-env}]
+     (let [save-result (sql.write/save-form! pathom-env params)
+           handler-result (handler pathom-env)]
+       (deep-merge save-result handler-result)))))

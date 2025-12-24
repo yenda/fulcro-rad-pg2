@@ -11,13 +11,13 @@
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
-   [com.fulcrologic.rad.database-adapters.sql.resolvers :as resolvers]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+   [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [com.fulcrologic.rad.form :as rad.form]
    [com.fulcrologic.rad.ids :as ids]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
+   [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
 ;; =============================================================================
@@ -26,6 +26,13 @@
 
 (def test-db-config
   {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
+
+(def pg2-config
+  {:host "localhost"
+   :port 5432
+   :user "user"
+   :password "password"
+   :database "fulcro-rad-pg2"})
 
 (def key->attribute (enc/keys-by ::attr/qualified-key attrs/all-attributes))
 
@@ -175,20 +182,24 @@
   [f]
   (let [ds (jdbc/get-datasource test-db-config)
         schema-name (generate-test-schema-name)
-        conn (jdbc/get-connection ds)]
+        jdbc-conn (jdbc/get-connection ds)
+        ;; Create pg2 pool with search_path set to test schema
+        pg2-pool (pg.pool/pool (assoc pg2-config
+                                      :pg-params {"search_path" schema-name}))]
     (try
-      (jdbc/execute! conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! conn [(str "SET search_path TO " schema-name)])
-      (doseq [s (mig/automatic-schema :production (vendor/->PostgreSQLAdapter) attrs/all-attributes)]
-        (jdbc/execute! conn [s]))
+      ;; Use JDBC for schema setup
+      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
+      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
+      (doseq [s (mig/automatic-schema :production attrs/all-attributes)]
+        (jdbc/execute! jdbc-conn [s]))
+      ;; Use pg2 pool for actual operations
       (let [env {::attr/key->attribute key->attribute
-                 ::rad.sql/connection-pools {:production conn}
-                 ::rad.sql/adapters {:production (vendor/->PostgreSQLAdapter)}
-                 ::rad.sql/default-adapter (vendor/->PostgreSQLAdapter)}]
-        (f conn env))
+                 ::rad.sql/connection-pools {:production pg2-pool}}]
+        (f jdbc-conn env))
       (finally
-        (jdbc/execute! conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close conn)))))
+        (pg.pool/close pg2-pool)
+        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
+        (.close jdbc-conn)))))
 
 (def jdbc-opts {:builder-fn rs/as-unqualified-lower-maps})
 
@@ -243,7 +254,7 @@
   (prop/for-all [delta gen-single-insert-delta]
                 (with-test-db
                   (fn [conn env]
-                    (let [result (resolvers/save-form! env {::rad.form/delta delta})]
+                    (let [result (write/save-form! env {::rad.form/delta delta})]
                       (and (prop-tempids-resolved delta result)
                            (prop-tempids-unique result)))))))
 
@@ -251,7 +262,7 @@
   (prop/for-all [delta gen-multi-insert-delta]
                 (with-test-db
                   (fn [conn env]
-                    (let [result (resolvers/save-form! env {::rad.form/delta delta})]
+                    (let [result (write/save-form! env {::rad.form/delta delta})]
                       (and (prop-tempids-resolved delta result)
                            (prop-tempids-unique result)))))))
 
@@ -259,14 +270,14 @@
   (prop/for-all [delta gen-single-insert-delta]
                 (with-test-db
                   (fn [conn env]
-                    (let [result (resolvers/save-form! env {::rad.form/delta delta})]
+                    (let [result (write/save-form! env {::rad.form/delta delta})]
                       (prop-data-persisted conn delta result))))))
 
 (defspec insert-with-reference-works 20
   (prop/for-all [delta gen-insert-with-reference-delta]
                 (with-test-db
                   (fn [conn env]
-                    (let [result (resolvers/save-form! env {::rad.form/delta delta})
+                    (let [result (write/save-form! env {::rad.form/delta delta})
                           ;; Find the account and address tempids
                           account-entry (first (filter #(= "account" (namespace (ffirst %))) delta))
                           address-entry (first (filter #(= "address" (namespace (ffirst %))) delta))
@@ -284,7 +295,7 @@
                   (fn [conn env]
                     (let [before-accounts (count-rows conn "accounts")
                           before-addresses (count-rows conn "addresses")
-                          result (resolvers/save-form! env {::rad.form/delta {}})
+                          result (write/save-form! env {::rad.form/delta {}})
                           after-accounts (count-rows conn "accounts")
                           after-addresses (count-rows conn "addresses")]
                       (and (empty? (:tempids result))
@@ -296,7 +307,7 @@
                 (with-test-db
                   (fn [conn env]
                     ;; First insert an entity
-                    (let [insert-result (resolvers/save-form! env {::rad.form/delta insert-delta})
+                    (let [insert-result (write/save-form! env {::rad.form/delta insert-delta})
                           ;; Get the first account tempid and its real id
                           account-entries (filter #(= "account" (namespace (ffirst %))) insert-delta)]
                       (if (empty? account-entries)
@@ -306,9 +317,9 @@
                               ;; Create an update delta
                               update-delta {[:account/id real-id] {:account/name {:before "old" :after "new-name"}}}
                               ;; Apply update twice
-                              _ (resolvers/save-form! env {::rad.form/delta update-delta})
+                              _ (write/save-form! env {::rad.form/delta update-delta})
                               after-first (get-account conn real-id)
-                              _ (resolvers/save-form! env {::rad.form/delta update-delta})
+                              _ (write/save-form! env {::rad.form/delta update-delta})
                               after-second (get-account conn real-id)]
                           ;; Both should have same state
                           (= after-first after-second))))))))
@@ -320,12 +331,12 @@
                     ;; Insert an account first
                     (let [tempid (tempid/tempid)
                           insert-delta {[:account/id tempid] {:account/name {:after "ToDelete"}}}
-                          insert-result (resolvers/save-form! env {::rad.form/delta insert-delta})
+                          insert-result (write/save-form! env {::rad.form/delta insert-delta})
                           real-id (get (:tempids insert-result) tempid)
                           _ (is (some? (get-account conn real-id)) "Account should exist after insert")
                           ;; Delete it
                           delete-delta {[:account/id real-id] {:delete true}}
-                          _ (resolvers/save-form! env {::rad.form/delta delete-delta})]
+                          _ (write/save-form! env {::rad.form/delta delete-delta})]
                       (nil? (get-account conn real-id)))))))
 
 ;; =============================================================================
@@ -344,7 +355,7 @@
                                          [[:account/id tid]
                                           {:account/name {:after (str "Account" i)}}])
                                        tempids))
-                          result (resolvers/save-form! env {::rad.form/delta delta})]
+                          result (write/save-form! env {::rad.form/delta delta})]
                       ;; All tempids should be resolved
                       (and (= num-inserts (count (:tempids result)))
                            (= num-inserts (count-rows conn "accounts"))))))))
@@ -424,7 +435,7 @@
                                     true identity)
 
                             ;; Execute the complex save
-                            result (resolvers/save-form! env {::rad.form/delta delta})
+                            result (write/save-form! env {::rad.form/delta delta})
 
                             ;; Verify all operations succeeded
                             new-account-real-id (get (:tempids result) new-account-tempid)
@@ -519,17 +530,17 @@
                 (with-test-db
                   (fn [conn env]
                     (try
-                      (resolvers/save-form! env {::rad.form/delta chaos-delta})
+                      (write/save-form! env {::rad.form/delta chaos-delta})
                       false ;; Should have thrown - test fails if we get here
                       (catch clojure.lang.ExceptionInfo e
                         (let [data (ex-data e)]
                           (and
                            ;; Must be our wrapped error type
-                           (= ::resolvers/save-error (:type data))
+                           (= ::write/save-error (:type data))
                            ;; Must have a known cause
-                           (#{::resolvers/string-data-too-long
-                              ::resolvers/invalid-encoding
-                              ::resolvers/invalid-text-representation}
+                           (#{::write/string-data-too-long
+                              ::write/invalid-encoding
+                              ::write/invalid-text-representation}
                             (:cause data))
                            ;; Must have SQL state
                            (string? (:sql-state data))

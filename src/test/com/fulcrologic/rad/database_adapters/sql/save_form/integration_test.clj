@@ -9,15 +9,15 @@
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
-   [com.fulcrologic.rad.database-adapters.sql.resolvers :as resolvers]
+   [com.fulcrologic.rad.database-adapters.sql.write :as write]
    [com.fulcrologic.rad.database-adapters.sql.save-form.invariants :as inv]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [com.fulcrologic.rad.form :as rad.form]
    [com.fulcrologic.rad.ids :as ids]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
    [next.jdbc.sql :as sql]
+   [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
 ;; =============================================================================
@@ -26,6 +26,13 @@
 
 (def test-db-config
   {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
+
+(def pg2-config
+  {:host "localhost"
+   :port 5432
+   :user "user"
+   :password "password"
+   :database "fulcro-rad-pg2"})
 
 ;; =============================================================================
 ;; Test Fixtures
@@ -42,25 +49,27 @@
   [f]
   (let [ds (jdbc/get-datasource test-db-config)
         schema-name (generate-test-schema-name)
-        ;; Get a connection and keep it for the duration
-        conn (jdbc/get-connection ds)]
+        ;; Get JDBC connection for schema setup
+        jdbc-conn (jdbc/get-connection ds)
+        ;; Create pg2 pool with search_path set to test schema
+        pg2-pool (pg.pool/pool (assoc pg2-config
+                                      :pg-params {"search_path" schema-name}))]
     (try
-      ;; Create isolated test schema
-      (jdbc/execute! conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! conn [(str "SET search_path TO " schema-name)])
+      ;; Create isolated test schema using JDBC
+      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
+      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
       ;; Create tables using automatic schema generation
-      (doseq [s (mig/automatic-schema :production (vendor/->PostgreSQLAdapter) attrs/all-attributes)]
-        (jdbc/execute! conn [s]))
-      ;; Run the test with the same connection
+      (doseq [s (mig/automatic-schema :production attrs/all-attributes)]
+        (jdbc/execute! jdbc-conn [s]))
+      ;; Run the test with pg2 pool for writes, JDBC for reads/verification
       (let [env {::attr/key->attribute key->attribute
-                 ::rad.sql/connection-pools {:production conn}
-                 ::rad.sql/adapters {:production (vendor/->PostgreSQLAdapter)}
-                 ::rad.sql/default-adapter (vendor/->PostgreSQLAdapter)}]
-        (f conn env))
+                 ::rad.sql/connection-pools {:production pg2-pool}}]
+        (f jdbc-conn env))
       (finally
-        ;; Clean up - drop the schema
-        (jdbc/execute! conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close conn)))))
+        ;; Clean up
+        (pg.pool/close pg2-pool)
+        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
+        (.close jdbc-conn)))))
 
 ;; =============================================================================
 ;; Helper Functions
@@ -94,7 +103,7 @@
               params {::rad.form/delta delta}
 
               ;; Execute save
-              result (resolvers/save-form! env params)
+              result (write/save-form! env params)
 
               ;; Verify tempid resolution invariant
               inv-result (inv/check-invariant
@@ -121,7 +130,7 @@
                      [:account/id tempid2] {:account/name {:after "Bob"}}}
               params {::rad.form/delta delta}
 
-              result (resolvers/save-form! env params)
+              result (write/save-form! env params)
 
               ;; Verify invariants
               inv-result (inv/check-invariant
@@ -150,7 +159,7 @@
                 params {::rad.form/delta delta}
                 before-snapshot (inv/take-snapshot ds ["accounts"])
 
-                result (resolvers/save-form! env params)
+                result (write/save-form! env params)
 
                 after-snapshot (inv/take-snapshot ds ["accounts"])
                 diff (inv/diff-snapshots before-snapshot after-snapshot)]
@@ -174,11 +183,11 @@
                 params {::rad.form/delta delta}]
 
             ;; First update
-            (resolvers/save-form! env params)
+            (write/save-form! env params)
             (let [after-first (inv/take-snapshot ds ["accounts"])]
 
               ;; Second update (same delta)
-              (resolvers/save-form! env params)
+              (write/save-form! env params)
               (let [after-second (inv/take-snapshot ds ["accounts"])
 
                     inv-result (inv/check-invariant-2
@@ -202,7 +211,7 @@
           (let [delta {[:account/id account-id] {:delete true}}
                 params {::rad.form/delta delta}]
 
-            (resolvers/save-form! env params)
+            (write/save-form! env params)
 
             (is (= 0 (count-accounts ds)) "Account should be deleted")))))))
 
@@ -225,7 +234,7 @@
                         :account/primary-address {:after [:address/id address-id]}}}
                 params {::rad.form/delta delta}
 
-                result (resolvers/save-form! env params)
+                result (write/save-form! env params)
                 real-account-id (get (:tempids result) account-tempid)
                 account (get-account ds real-account-id)]
 
@@ -248,7 +257,7 @@
                       :address/city {:after "NYC"}}}
               params {::rad.form/delta delta}
 
-              result (resolvers/save-form! env params)]
+              result (write/save-form! env params)]
 
           ;; Both tempids should be resolved
           (is (= 2 (count (:tempids result))))
@@ -281,7 +290,7 @@
                                                   :after [:address/id new-address-id]}}}
                 params {::rad.form/delta delta}]
 
-            (resolvers/save-form! env params)
+            (write/save-form! env params)
 
             (let [account (get-account ds account-id)]
               (is (= new-address-id (:primary_address account))))))))))
@@ -303,7 +312,7 @@
                                                   :after nil}}}
                 params {::rad.form/delta delta}]
 
-            (resolvers/save-form! env params)
+            (write/save-form! env params)
 
             (let [account (get-account ds account-id)]
               (is (nil? (:primary_address account))))))))))
@@ -325,7 +334,7 @@
                 delta {[:account/id account-tempid] {:account/name {:after "New Account"}}}
                 params {::rad.form/delta delta}
 
-                _ (resolvers/save-form! env params)
+                _ (write/save-form! env params)
 
                 after (inv/take-snapshot ds ["accounts" "addresses"])
 
@@ -351,7 +360,7 @@
                       :address/state {:after :state/AZ}}}
               params {::rad.form/delta delta}
 
-              result (resolvers/save-form! env params)
+              result (write/save-form! env params)
               real-id (get (:tempids result) address-tempid)
               address (get-address ds real-id)]
 
@@ -371,7 +380,7 @@
               params {::rad.form/delta delta}
 
               result (inv/verify-save!
-                      {:save-fn resolvers/save-form!
+                      {:save-fn write/save-form!
                        :env env
                        :params params
                        :ds ds
@@ -395,7 +404,7 @@
               delta {}
               params {::rad.form/delta delta}
 
-              result (resolvers/save-form! env params)
+              result (write/save-form! env params)
 
               after (inv/take-snapshot ds ["accounts" "addresses"])]
 
@@ -414,7 +423,7 @@
                 delta {[:account/id account-id] {:account/name {:before "Alice" :after "Alice"}}}
                 params {::rad.form/delta delta}
 
-                result (resolvers/save-form! env params)
+                result (write/save-form! env params)
 
                 after (inv/take-snapshot ds ["accounts"])]
 
@@ -434,7 +443,7 @@
                        {:account/email {:before "alice@example.com" :after nil}}}
                 params {::rad.form/delta delta}]
 
-            (resolvers/save-form! env params)
+            (write/save-form! env params)
 
             (let [account (get-account ds account-id)]
               (is (nil? (:email account))))))))))
@@ -456,7 +465,7 @@
             (let [tempid (tempid/tempid)
                   delta {[:account/id tempid]
                          {:account/name {:after evil-string}}}
-                  result (resolvers/save-form! env {::rad.form/delta delta})
+                  result (write/save-form! env {::rad.form/delta delta})
                   real-id (get (:tempids result) tempid)
                   account (get-account ds real-id)]
               (is (some? account) (str "Account should exist for: " evil-string))
@@ -477,7 +486,7 @@
             (let [tempid (tempid/tempid)
                   delta {[:account/id tempid]
                          {:account/name {:after unicode-str}}}
-                  result (resolvers/save-form! env {::rad.form/delta delta})
+                  result (write/save-form! env {::rad.form/delta delta})
                   real-id (get (:tempids result) tempid)
                   account (get-account ds real-id)]
               (is (= unicode-str (:name account))
@@ -499,7 +508,7 @@
             (let [tempid (tempid/tempid)
                   delta {[:account/id tempid]
                          {:account/name {:after special-str}}}
-                  result (resolvers/save-form! env {::rad.form/delta delta})
+                  result (write/save-form! env {::rad.form/delta delta})
                   real-id (get (:tempids result) tempid)
                   account (get-account ds real-id)]
               (is (= special-str (:name account))
@@ -512,7 +521,7 @@
         (let [tempid (tempid/tempid)
               delta {[:account/id tempid]
                      {:account/name {:after ""}}}
-              result (resolvers/save-form! env {::rad.form/delta delta})
+              result (write/save-form! env {::rad.form/delta delta})
               real-id (get (:tempids result) tempid)
               account (get-account ds real-id)]
           (is (= "" (:name account)) "Empty string should be preserved, not converted to null"))))))
@@ -531,12 +540,12 @@
               delta {[:account/id tempid]
                      {:account/name {:after oversized-string}}}]
           (try
-            (resolvers/save-form! env {::rad.form/delta delta})
+            (write/save-form! env {::rad.form/delta delta})
             (is false "Should have thrown")
             (catch clojure.lang.ExceptionInfo e
               (let [data (ex-data e)]
-                (is (= ::resolvers/save-error (:type data)))
-                (is (= ::resolvers/string-data-too-long (:cause data)))
+                (is (= ::write/save-error (:type data)))
+                (is (= ::write/string-data-too-long (:cause data)))
                 (is (= "22001" (:sql-state data)))
                 (is (some? (:message data)))
                 (is (instance? org.postgresql.util.PSQLException (ex-cause e)))))))))))
@@ -550,12 +559,12 @@
               delta {[:account/id tempid]
                      {:account/name {:after string-with-null}}}]
           (try
-            (resolvers/save-form! env {::rad.form/delta delta})
+            (write/save-form! env {::rad.form/delta delta})
             (is false "Should have thrown")
             (catch clojure.lang.ExceptionInfo e
               (let [data (ex-data e)]
-                (is (= ::resolvers/save-error (:type data)))
-                (is (= ::resolvers/invalid-encoding (:cause data)))
+                (is (= ::write/save-error (:type data)))
+                (is (= ::write/invalid-encoding (:cause data)))
                 (is (= "22021" (:sql-state data)))
                 (is (some? (:message data)))
                 (is (instance? org.postgresql.util.PSQLException (ex-cause e)))))))))))
@@ -649,7 +658,7 @@
                 params {::rad.form/delta delta}
 
                 ;; EXECUTE
-                result (resolvers/save-form! env params)
+                result (write/save-form! env params)
 
                 ;; Extract resolved tempids
                 diana-real-id (get (:tempids result) diana-tempid)

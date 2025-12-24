@@ -8,12 +8,12 @@
    [com.fulcrologic.rad.database-adapters.sql.perf.attributes :as perf-attrs]
    [com.fulcrologic.rad.database-adapters.sql.perf.benchmark :as bench]
    [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
-   [com.fulcrologic.rad.database-adapters.sql.resolvers-pathom3 :as resolvers-p3]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
+   [com.fulcrologic.rad.database-adapters.sql.read :as read]
    [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.interface.eql :as p.eql]
    [next.jdbc :as jdbc]
+   [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
 (def test-db-config
@@ -72,7 +72,7 @@
       ;; Setup schema using JDBC
       (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
       (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
-      (doseq [s (mig/automatic-schema :perf (vendor/->PostgreSQLAdapter) perf-attrs/all-attributes)]
+      (doseq [s (mig/automatic-schema :perf perf-attrs/all-attributes)]
         (jdbc/execute! jdbc-conn [s]))
 
       ;; Seed data
@@ -88,14 +88,11 @@
                                                     :pg-params {"search_path" schema-name}}})
             _ (reset! pg2-pool* pg2-pool)
 
-            ;; Build pathom env with pg2
-            pg2-wrapper {:driver :pg2 :pool pg2-pool}
-            resolvers (resolvers-p3/generate-resolvers perf-attrs/all-attributes :perf)
+            ;; Build pathom env with pg2 - pool used directly, no wrapper needed
+            resolvers (read/generate-resolvers perf-attrs/all-attributes :perf)
             pathom-env (-> (pci/register resolvers)
                            (assoc ::attr/key->attribute key->attribute
-                                  ::rad.sql/connection-pools {:perf pg2-wrapper}
-                                  ::rad.sql/adapters {:perf (vendor/->PostgreSQLAdapter)}
-                                  ::rad.sql/default-adapter (vendor/->PostgreSQLAdapter)))
+                                  ::rad.sql/connection-pools {:perf pg2-pool}))
             pathom-query #(p.eql/process pathom-env %)
             results (atom {})]
 
@@ -157,4 +154,4 @@
         (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
         (.close jdbc-conn)
         (when-let [p @pg2-pool*]
-          (pg2/close-pool p))))))
+          (pg.pool/close p))))))

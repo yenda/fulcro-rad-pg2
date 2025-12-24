@@ -14,7 +14,6 @@
    [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
    [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
    [com.fulcrologic.rad.database-adapters.sql.schema :as sql.schema]
-   [com.fulcrologic.rad.database-adapters.sql.vendor :as vendor]
    [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.encore :as enc]
@@ -75,7 +74,7 @@
 
 (defmethod op->sql :table [_ adapter {:keys [table]}] (format "CREATE TABLE IF NOT EXISTS %s ();\n" table))
 
-(defmethod op->sql :ref [k->attr adapter {:keys [table column attr]}]
+(defmethod op->sql :ref [k->attr _ {:keys [table column attr]}]
   (let [{::attr/keys [cardinality target identities qualified-key]} attr
         target-attr (k->attr target)]
     (if (= :many cardinality)
@@ -89,8 +88,8 @@
                      column (sql.schema/column-name k->attr attr)
                      index-name (str column "_idx")]
           (str
-           (vendor/add-referential-column-statement adapter
-                                                    table column (sql-type reverse-target-attr) rev-target-table rev-target-column)
+           (pg2/add-referential-column-statement
+            table column (sql-type reverse-target-attr) rev-target-table rev-target-column)
            (format "CREATE INDEX IF NOT EXISTS %s ON %s(%s);\n"
                    index-name table column))
           (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))
@@ -101,8 +100,8 @@
                    target-type (sql-type target-attr)
                    index-name (str column "_idx")]
         (str
-         (vendor/add-referential-column-statement adapter
-                                                  origin-table origin-column target-type target-table target-column)
+         (pg2/add-referential-column-statement
+          origin-table origin-column target-type target-table target-column)
          (format "CREATE INDEX IF NOT EXISTS %s ON %s(%s);\n"
                  index-name table column))
         (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))))
@@ -149,12 +148,12 @@
 
 (>defn automatic-schema
        "Returns SQL schema for all attributes that support it."
-       [schema-name adapter attributes]
-       [keyword? ::vendor/adapter ::attr/attributes => (s/coll-of string?)]
+       [schema-name attributes]
+       [keyword? ::attr/attributes => (s/coll-of string?)]
        (let [key->attribute (attr/attribute-map attributes)
              db-ops (mapcat (partial attr->ops schema-name key->attribute) attributes)
              {:keys [id table column ref]} (group-by :type db-ops)
-             op (partial op->sql key->attribute adapter)
+             op (partial op->sql key->attribute nil)
              new-tables (mapv op (set table))
              new-ids (mapv op (set id))
              new-columns (mapv op (set column))
@@ -257,8 +256,7 @@
 (defn- run-auto-schema!
   "Auto-create schema from RAD attributes using pg2."
   [pool schema all-attributes]
-  (let [adapter (vendor/->PostgreSQLAdapter)
-        stmts (automatic-schema schema adapter all-attributes)]
+  (let [stmts (automatic-schema schema all-attributes)]
     (log/info "Automatically trying to create SQL schema from attributes.")
     (pg.pool/with-conn [conn pool]
       (doseq [s stmts]

@@ -4,12 +4,16 @@
    PG2 is a native PostgreSQL driver that bypasses JDBC for significantly
    better performance (typically 70-99% faster than next.jdbc).
 
-   Usage:
-   Configure your database with `:sql/driver :pg2`:
+   This module provides:
+   - Connection pool management
+   - Query execution with prepared statement optimization
+   - Type transformation (Clojure ↔ PostgreSQL)
+   - Constraint handling for transactions
 
+   Usage:
    ```clojure
    :com.fulcrologic.rad.database-adapters.sql/databases
-   {:main {:sql/driver :pg2
+   {:main {:sql/schema :production
            :pg2/config {:host \"localhost\"
                         :port 5432
                         :user \"myuser\"
@@ -17,14 +21,6 @@
                         :database \"mydb\"}
            :pg2/pool {:pool-min-size 2
                       :pool-max-size 10}}}
-   ```
-
-   Or convert from existing JDBC URL:
-
-   ```clojure
-   :com.fulcrologic.rad.database-adapters.sql/databases
-   {:main {:sql/driver :pg2
-           :pg2/jdbc-url \"jdbc:postgresql://localhost:5432/mydb?user=myuser&password=mypassword\"}}
    ```"
   (:require
    [camel-snake-kebab.core :as csk]
@@ -32,17 +28,139 @@
    [pg.pool :as pool]
    [taoensso.timbre :as log])
   (:import
-   [java.time OffsetDateTime]))
+   [java.sql Timestamp]
+   [java.time Instant OffsetDateTime]))
 
 ;; =============================================================================
-;; Value Normalization
+;; Type Transformation (Clojure ↔ PostgreSQL)
+;; =============================================================================
+
+(defn keyword->sql-string
+  "Convert keyword to string, preserving the leading colon.
+   (str :state/AZ) -> \":state/AZ\""
+  [x]
+  (if (keyword? x) (str x) x))
+
+(defn sql-string->keyword
+  "Convert string to keyword, handling the leading colon.
+   \":state/AZ\" -> :state/AZ"
+  [x]
+  (if (string? x)
+    (if (.startsWith ^String x ":")
+      (keyword (subs x 1))
+      (keyword x))
+    x))
+
+(defn symbol->sql-string
+  "Convert symbol to string for SQL storage."
+  [x]
+  (if (symbol? x) (str x) x))
+
+(defn sql-string->symbol
+  "Convert string to symbol."
+  [x]
+  (if (string? x) (symbol x) x))
+
+(defn instant->timestamp
+  "Convert java.time.Instant to java.sql.Timestamp for SQL storage."
+  [x]
+  (cond
+    (instance? Instant x) (Timestamp/from x)
+    (instance? Timestamp x) x
+    :else x))
+
+(defn timestamp->instant
+  "Convert java.sql.Timestamp or OffsetDateTime to java.time.Instant."
+  [x]
+  (cond
+    (instance? OffsetDateTime x) (.toInstant ^OffsetDateTime x)
+    (instance? Timestamp x) (.toInstant ^Timestamp x)
+    (instance? Instant x) x
+    :else x))
+
+;; Encoder/Decoder registries for extensibility
+(defonce ^{:doc "Map of RAD type -> encoder function (Clojure -> SQL)"}
+  encoders
+  (atom {:enum     keyword->sql-string
+         :keyword  keyword->sql-string
+         :symbol   symbol->sql-string
+         :instant  instant->timestamp}))
+
+(defonce ^{:doc "Map of RAD type -> decoder function (SQL -> Clojure)"}
+  decoders
+  (atom {:enum     sql-string->keyword
+         :keyword  sql-string->keyword
+         :symbol   sql-string->symbol
+         :instant  timestamp->instant}))
+
+(defn register-encoder!
+  "Register a custom encoder for a RAD type."
+  [rad-type encoder-fn]
+  (swap! encoders assoc rad-type encoder-fn))
+
+(defn register-decoder!
+  "Register a custom decoder for a RAD type."
+  [rad-type decoder-fn]
+  (swap! decoders assoc rad-type decoder-fn))
+
+(defn encode-for-sql
+  "Transform Clojure value for SQL storage based on RAD type."
+  [rad-type value]
+  (when (some? value)
+    (if-let [encoder (get @encoders rad-type)]
+      (encoder value)
+      value)))
+
+(defn decode-from-sql
+  "Transform SQL value to Clojure value based on RAD type."
+  [rad-type value]
+  (when (some? value)
+    (if-let [decoder (get @decoders rad-type)]
+      (decoder value)
+      value)))
+
+(defn- pg2-decode-value
+  "Decode a pg2 native value based on RAD type."
+  [rad-type value]
+  (when (some? value)
+    (case rad-type
+      (:keyword :enum) (sql-string->keyword value)
+      :symbol (sql-string->symbol value)
+      :instant (timestamp->instant value)
+      value)))
+
+(defn compile-pg2-row-transformer
+  "Compile a function that transforms pg2 raw output directly to resolver format.
+
+   This is the zero-copy fast path for pg2. Combines column name mapping
+   and type transformation in a single pass.
+
+   Arguments:
+     column-config - Map of database column keywords to config:
+                     {:created_at {:output-path [:message/created-at]
+                                   :type :instant}
+                      :status     {:output-path [:message/status]
+                                   :type :enum}}"
+  [column-config]
+  (let [entries (vec column-config)]
+    (fn transform-row [raw-row]
+      (reduce
+       (fn [acc [col {:keys [output-path type]}]]
+         (let [v (get raw-row col)]
+           (if (some? v)
+             (assoc-in acc output-path (pg2-decode-value type v))
+             acc)))
+       {}
+       entries))))
+
+;; =============================================================================
+;; Value Normalization (for non-zero-copy path)
 ;; =============================================================================
 
 (defn- normalize-value
   "Normalize pg2 result values to match next.jdbc conventions."
   [v]
   (cond
-    ;; Convert OffsetDateTime to Instant for consistency
     (instance? OffsetDateTime v) (.toInstant ^OffsetDateTime v)
     :else v))
 
@@ -76,7 +194,6 @@
 
 (defn parse-jdbc-url
   "Parse a JDBC URL into pg2 config format.
-
    Supports: jdbc:postgresql://host:port/database?user=x&password=y"
   [jdbc-url]
   (let [url (java.net.URI. (.replace ^String jdbc-url "jdbc:" ""))
@@ -99,13 +216,7 @@
      :password (:password query-params)}))
 
 (defn build-pool-config
-  "Build pg2 pool configuration from database config.
-
-   Supports either:
-   - :pg2/config map with :host, :port, :user, :password, :database
-   - :pg2/jdbc-url string to be parsed
-
-   Optional :pg2/pool map for pool settings."
+  "Build pg2 pool configuration from database config."
   [{:pg2/keys [config jdbc-url pool]}]
   (let [base-config (if jdbc-url
                       (parse-jdbc-url jdbc-url)
@@ -132,6 +243,13 @@
   [pool]
   (pool/close pool))
 
+(defn stop-connection-pools!
+  "Stop all connection pools."
+  [connection-pools]
+  (doseq [[k pool] connection-pools]
+    (log/info "Shutting down pool" k)
+    (close-pool pool)))
+
 ;; =============================================================================
 ;; Performance Logging
 ;; =============================================================================
@@ -155,11 +273,8 @@
 
 (defn pg2-query!
   "Execute a SQL query using pg2.
-
    Takes a pg2 pool and a HoneySQL-formatted query vector [sql & params].
-   Returns a vector of maps with kebab-case keyword keys.
-
-   This function is compatible with the ::rad.sql/query-fn interface."
+   Returns a vector of maps with kebab-case keyword keys."
   [pool [sql & params]]
   (pool/with-conn [conn pool]
     (let [pg2-sql (convert-params sql)
@@ -168,13 +283,8 @@
 
 (defn pg2-query-raw!
   "Execute a SQL query using pg2, returning raw results.
-
-   Returns pg2's native format: vector of maps with keyword keys matching
-   database column names (e.g., :created_at not :created-at).
-   Values are pg2 native types (OffsetDateTime, not Instant).
-
-   Use with compiled row transformers for maximum performance - avoids
-   the overhead of normalize-row when you have a pre-compiled transformer."
+   Returns pg2's native format without normalization.
+   Use with compiled row transformers for maximum performance."
   [pool [sql & params]]
   (pool/with-conn [conn pool]
     (let [pg2-sql (convert-params sql)]
@@ -182,21 +292,23 @@
 
 (defn pg2-query-prepared!
   "Execute a pre-compiled SQL query with array parameter.
-
-   This function is optimized for prepared statement caching:
-   - Takes a static SQL string (no HoneySQL formatting at query time)
-   - Uses array parameter syntax ($1::type[]) for variable-length ID lists
-   - Ensures 100% prepared statement cache hit rate regardless of batch size
-
-   Arguments:
-     pool       - pg2 connection pool
-     sql        - Pre-compiled SQL string with $1::type[] syntax
-     ids        - Collection of IDs to pass as array parameter
-
-   Example:
-     (pg2-query-prepared! pool
-       \"SELECT * FROM users WHERE id = ANY($1::uuid[])\"
-       [uuid1 uuid2 uuid3])"
+   Uses $1::type[] syntax for 100% prepared statement cache hit rate."
   [pool sql ids]
   (pool/with-conn [conn pool]
     (pg/execute conn sql {:params [(vec ids)]})))
+
+;; =============================================================================
+;; Constraint Handling (PostgreSQL-specific)
+;; =============================================================================
+
+(defn relax-constraints!
+  "Defer constraint checking until end of transaction.
+   Call within a pg/with-transaction block."
+  [conn]
+  (pg/execute conn "SET CONSTRAINTS ALL DEFERRED"))
+
+(defn add-referential-column-statement
+  "Generate ALTER TABLE statement to add a FK column."
+  [origin-table origin-column target-type target-table target-column]
+  (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s REFERENCES %s(%s) DEFERRABLE INITIALLY DEFERRED;\n"
+          origin-table origin-column target-type target-table target-column))
