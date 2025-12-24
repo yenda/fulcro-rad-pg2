@@ -1,6 +1,7 @@
 (ns com.fulcrologic.rad.database-adapters.sql.read
   "Pathom3 read resolvers for pg2 PostgreSQL driver."
   (:require
+   [camel-snake-kebab.core :as csk]
    [clojure.string :as str]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.authorization :as auth]
@@ -17,15 +18,17 @@
 
 (defn get-column
   "Extract SQL column name from attribute.
-   Checks ::rad.sql/column-name, then :column, then derives from qualified-key name.
+   Checks ::rad.sql/column-name, then derives from qualified-key name with snake_case.
    Returns a keyword for HoneySQL compatibility."
   [attribute]
   (let [col (or (::rad.sql/column-name attribute)
-                (:column attribute)
-                (some-> (::attr/qualified-key attribute) name))]
+                (some-> (::attr/qualified-key attribute) name csk/->snake_case))]
     (if col
       (keyword col)
-      (throw (ex-info "Can't find column name for attribute" {:attribute attribute})))))
+      (throw (ex-info "Can't find column name for attribute"
+                      {:attribute attribute
+                       :qualified-key (::attr/qualified-key attribute)
+                       :type :missing-column})))))
 
 (defn get-table
   "Extract SQL table name from attribute's ::rad.sql/table.
@@ -41,7 +44,10 @@
     :uuid "uuid[]"
     :int "int4[]"
     :long "int8[]"
-    :string "text[]"
+    :boolean "boolean[]"
+    :decimal "numeric[]"
+    :instant "timestamptz[]"
+    (:keyword :enum :string) "text[]"
     "text[]"))
 
 (defn to-one-keyword
@@ -79,12 +85,19 @@
                         (id-attr->attributes id-attribute))]
     outputs))
 
-(defn get-column-mapping [column->outputs]
+(defn get-column-mapping
+  "Transform column->outputs map to seq of [output-path column] pairs.
+   Used to build the pg2 column config for row transformation.
+
+   For scalar outputs: [[[:attr-key] :column]]
+   For ref outputs with nested target: [[[:ref-key :target-key] :column]]"
+  [column->outputs]
   (reduce-kv (fn [acc column outputs]
                (reduce (fn [acc output]
                          (if (keyword? output)
                            (conj acc [[output] column])
-                           (conj acc [(vec (flatten (vec output))) column])))
+                           ;; For map entries like {:ref-key [:target-key]}, flatten to [:ref-key :target-key]
+                           (conj acc [(vec (flatten (seq output))) column])))
                        acc
                        outputs))
              []
@@ -113,16 +126,34 @@
    column-mapping))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Pool Access
+
+(defn get-pool
+  "Get connection pool for schema from env, throwing if not found."
+  [env schema]
+  (or (get-in env [::rad.sql/connection-pools schema])
+      (throw (ex-info "No connection pool configured for schema"
+                      {:schema schema
+                       :available-schemas (keys (::rad.sql/connection-pools env))
+                       :type :missing-pool}))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ID Resolver
 
-(defn id-resolver [{::attr/keys [id-attr id-attr->attributes attributes k->attr] :as c}]
+(defn id-resolver
+  "Generate a batch resolver for fetching entities by their ID attribute.
+   Returns a Pathom3 resolver that:
+   - Takes a vector of entity IDs as input
+   - Executes a single batch SQL query with = ANY($1::type[])
+   - Returns results in the same order as input IDs (nil for missing)"
+  [{::attr/keys [id-attr id-attr->attributes k->attr]}]
   (let [id-attr-k (::attr/qualified-key id-attr)
         column->outputs (get-column->outputs id-attr-k id-attr->attributes k->attr false)
         column-mapping (get-column-mapping column->outputs)
         column->attr (get-column->attr id-attr id-attr->attributes k->attr)
         pg2-column-config (build-pg2-column-config column-mapping column->attr)
         pg2-transform-row (pg2/compile-pg2-row-transformer pg2-column-config)
-        outputs (vec (flatten (vals column->outputs)))
+        outputs (into [] cat (vals column->outputs))
         columns (keys column->outputs)
         table (get-table id-attr)
         id-column (get-column id-attr)
@@ -147,20 +178,18 @@
              ::pco/resolve
              (fn [env input]
                (let [ids (mapv id-attr-k input)]
-                 (if (empty? ids)
-                   []
+                 (when (seq ids)
                    (pg2/timer
                     "id-resolver"
-                    (let [pool (get-in env [::rad.sql/connection-pools schema])
+                    (let [pool (get-pool env schema)
                           rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
                           results-by-id (reduce
                                          (fn [acc row]
                                            (let [result (pg2-transform-row row)]
                                              (assoc acc (id-attr-k result) result)))
                                          {}
-                                         rows)
-                          results (mapv (fn [id] (get results-by-id id)) ids)]
-                      (auth/redact env results))
+                                         rows)]
+                      (auth/redact env (mapv results-by-id ids)))
                     {:op-name op-name}))))
              ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
@@ -170,39 +199,43 @@
 ;; To-Many Resolver
 
 (defn to-many-resolvers
+  "Generate a batch resolver for to-many (reverse) references.
+   The target table has a FK column pointing back to the source entity.
+   Uses array_agg to fetch all related IDs in a single query."
   [{::attr/keys [schema]
-    ::rad.sql/keys [ref]
-    ::pco/keys [resolve transform] :as attr
+    ::rad.sql/keys [ref order-by]
+    ::pco/keys [resolve transform]
     attr-k ::attr/qualified-key
     target-k ::attr/target}
    id-attr-k
-   id-attr->attributes
+   _id-attr->attributes
    k->attr]
   (when-not resolve
     (when-not ref
-      (throw (ex-info "Missing ref in to-many ref" attr)))
+      (throw (ex-info (str "Missing ::rad.sql/ref for to-many attribute " attr-k)
+                      {:attr-key attr-k :type :missing-ref})))
     (let [op-name (symbol
                    (str (namespace attr-k))
                    (str (name attr-k) "-resolver"))
           _ (log/debug "Building Pathom3 resolver" op-name "for" attr-k "by" id-attr-k)
           target-attr (or (k->attr target-k)
-                          (throw (ex-info "Target attribute not found" attr)))
+                          (throw (ex-info (str "Target attribute " target-k " not found for " attr-k)
+                                          {:attr-key attr-k :target target-k :type :missing-target})))
           table (get-table target-attr)
           ref-attr (or (k->attr ref)
-                       (throw (ex-info "Ref attribute not found" attr)))
+                       (throw (ex-info (str "Ref attribute " ref " not found for " attr-k)
+                                       {:attr-key attr-k :ref ref :type :missing-ref-attr})))
           _ (when (= (::attr/cardinality ref-attr) :many)
-              (throw (ex-info "Many to many relations are not implemented" {:target-attr target-attr
-                                                                            :ref-attr ref-attr})))
+              (throw (ex-info "Many to many relations are not implemented"
+                              {:attr-key attr-k :target-attr target-k :ref-attr ref :type :unsupported})))
           relationship-column (get-column ref-attr)
           target-column (get-column target-attr)
-          order-by (some-> (::rad.sql/order-by attr)
-                           k->attr
-                           get-column)
+          order-by-column (some-> order-by k->attr get-column)
           id-attr (k->attr id-attr-k)
           pg2-prepared-sql (format "SELECT %s AS k, array_agg(%s%s) AS v FROM %s WHERE %s = ANY($1::%s) GROUP BY %s"
                                    (name relationship-column)
                                    (name target-column)
-                                   (if order-by (str " ORDER BY " (name order-by)) "")
+                                   (if order-by-column (str " ORDER BY " (name order-by-column)) "")
                                    (name table)
                                    (name relationship-column)
                                    (get-pg-array-type id-attr)
@@ -215,11 +248,10 @@
                     ::pco/resolve
                     (fn [env input]
                       (let [ids (mapv id-attr-k input)]
-                        (if (empty? ids)
-                          []
+                        (when (seq ids)
                           (pg2/timer
                            "to-many-resolver"
-                           (let [pool (get-in env [::rad.sql/connection-pools schema])
+                           (let [pool (get-pool env schema)
                                  rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
                                  results-by-id (reduce (fn [acc {:keys [k v]}]
                                                          (assoc acc k
@@ -227,9 +259,8 @@
                                                                                 {target-k v})
                                                                               v)}))
                                                        {}
-                                                       rows)
-                                 results (mapv #(get results-by-id %) ids)]
-                             (auth/redact env results))
+                                                       rows)]
+                             (auth/redact env (mapv results-by-id ids)))
                            {:op-name op-name}))))
                     ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]
@@ -238,28 +269,32 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; To-One Resolver
 
-(defn to-one-resolvers [{::attr/keys [schema]
-                         ::pco/keys [transform] :as attr
-                         ::rad.sql/keys [ref]
-                         attr-k ::attr/qualified-key
-                         target-k ::attr/target}
-                        id-attr-k
-                        id-attr->attributes
-                        k->attr]
+(defn to-one-resolvers
+  "Generate a resolver for to-one references.
+   Two cases:
+   1. Forward ref (no ::rad.sql/ref): Source table has FK column, use alias resolver
+   2. Reverse ref (has ::rad.sql/ref): Target table has FK, generate batch resolver"
+  [{::attr/keys [schema]
+    ::pco/keys [transform]
+    ::rad.sql/keys [ref]
+    attr-k ::attr/qualified-key
+    target-k ::attr/target}
+   id-attr-k
+   id-attr->attributes
+   k->attr]
   (if-not ref
-    ;; When there is no ref, the table has a column with the ref.
-    ;; Alias that ref attribute to reuse the id-resolver of the ref entity.
+    ;; Forward ref: source table has FK column.
+    ;; Alias to reuse the id-resolver of the target entity.
     (pbir/alias-resolver (to-one-keyword attr-k) target-k)
-    (let [{::attr/keys [schema]
-           ::pco/keys [transform]} attr
-          ref-attr (k->attr ref)
+    ;; Reverse ref: target table has FK pointing to source.
+    (let [ref-attr (k->attr ref)
           target-attr (k->attr target-k)
           column->outputs (get-column->outputs target-k id-attr->attributes k->attr true)
           column-mapping (get-column-mapping column->outputs)
           column->attr (get-column->attr target-attr id-attr->attributes k->attr)
           pg2-column-config (build-pg2-column-config column-mapping column->attr)
           pg2-transform-row (pg2/compile-pg2-row-transformer pg2-column-config)
-          outputs (vec (flatten (vals column->outputs)))
+          outputs (into [] cat (vals column->outputs))
           columns (keys column->outputs)
           table (get-table target-attr)
           ref-column (get-column ref-attr)
@@ -281,25 +316,22 @@
              ::pco/resolve
              (fn [env input]
                (let [ids (mapv id-attr-k input)]
-                 (if (empty? ids)
-                   []
+                 (when (seq ids)
                    (pg2/timer
                     "to-one-resolver"
-                    (let [pool (get-in env [::rad.sql/connection-pools schema])
+                    (let [pool (get-pool env schema)
                           rows (pg2/pg2-query-prepared! pool pg2-prepared-sql ids)
                           results-by-id (reduce
                                          (fn [acc row]
                                            (let [result (pg2-transform-row row)]
                                              (assoc acc (get-in result [ref id-attr-k]) result)))
                                          {}
-                                         rows)
-                          ;; Return nil for missing entities - Pathom3 batch semantics
-                          ;; treat nil as "no data found for this input"
-                          results (mapv (fn [id]
-                                          (when-let [outputs (get results-by-id id)]
-                                            (assoc outputs attr-k outputs)))
-                                        ids)]
-                      (auth/redact env results))
+                                         rows)]
+                      ;; Return nil for missing entities - Pathom3 batch semantics
+                      (auth/redact env (mapv (fn [id]
+                                               (when-let [result (results-by-id id)]
+                                                 (assoc result attr-k result)))
+                                             ids)))
                     {:op-name op-name}))))
              ::pco/input [id-attr-k]}
              transform (assoc ::pco/transform transform)))]

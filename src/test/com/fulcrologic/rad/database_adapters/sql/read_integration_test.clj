@@ -6,7 +6,9 @@
    - To-one resolvers (fetch related entity)
    - To-many resolvers (fetch related entities)
    - Batch queries (multiple entities at once)
-   - Missing entities (nil handling)"
+   - Missing entities (nil handling)
+
+   Uses Pathom3 lenient mode to allow nil results for missing entities."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [com.fulcrologic.rad.attributes :as attr]
@@ -16,6 +18,7 @@
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
+   [com.wsscode.pathom3.error :as p.error]
    [com.wsscode.pathom3.interface.eql :as p.eql]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
@@ -71,11 +74,13 @@
               stmt (split-sql-statements stmt-block)]
         (jdbc/execute! jdbc-conn [stmt]))
 
-      ;; Generate resolvers and create Pathom env
+      ;; Generate resolvers and create Pathom env with lenient mode
+      ;; Lenient mode allows nil results for missing entities instead of throwing
       (let [resolvers (read/generate-resolvers attrs/all-attributes :production)
             pathom-env (-> (pci/register resolvers)
                            (assoc ::attr/key->attribute key->attribute
-                                  ::rad.sql/connection-pools {:production pg2-pool}))]
+                                  ::rad.sql/connection-pools {:production pg2-pool}
+                                  ::p.error/lenient-mode? true))]
         (f jdbc-conn pathom-env))
 
       (finally

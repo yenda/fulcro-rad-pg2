@@ -13,13 +13,13 @@
     (is (= :my_column
            (sut/get-column {:com.fulcrologic.rad.database-adapters.sql/column-name "my_column"}))))
 
-  (testing "returns :column when present and no ::rad.sql/column-name"
-    (is (= :other_col
-           (sut/get-column {:column "other_col"}))))
-
-  (testing "derives from qualified-key name when no explicit column"
+  (testing "derives snake_case from qualified-key name"
     (is (= :name
            (sut/get-column {:com.fulcrologic.rad.attributes/qualified-key :user/name}))))
+
+  (testing "converts kebab-case to snake_case"
+    (is (= :primary_address
+           (sut/get-column {:com.fulcrologic.rad.attributes/qualified-key :account/primary-address}))))
 
   (testing "throws when no column can be derived"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Can't find column name"
@@ -55,11 +55,20 @@
 ;; =============================================================================
 
 (deftest get-pg-array-type-test
-  (testing "returns correct array type for each RAD type"
+  (testing "returns correct array type for common ID types"
     (is (= "uuid[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :uuid})))
     (is (= "int4[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :int})))
     (is (= "int8[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :long})))
     (is (= "text[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :string}))))
+
+  (testing "returns correct array type for less common types"
+    (is (= "boolean[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :boolean})))
+    (is (= "numeric[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :decimal})))
+    (is (= "timestamptz[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :instant}))))
+
+  (testing "returns text[] for keyword/enum types (stored as text)"
+    (is (= "text[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :keyword})))
+    (is (= "text[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :enum}))))
 
   (testing "defaults to text[] for unknown types"
     (is (= "text[]" (sut/get-pg-array-type {:com.fulcrologic.rad.attributes/type :unknown})))))
