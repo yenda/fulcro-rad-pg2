@@ -22,4 +22,10 @@ target
 .shadow-cljs
 .clj-kondo/.cache
 .clj-kondo/com.fulcrologic/fulcro/*
+.clj-kondo/imports/
 .lsp/.cache
+
+# Benchmark results
+*.edn
+!deps.edn
+!bb.edn
