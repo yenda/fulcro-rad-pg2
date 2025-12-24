@@ -155,7 +155,7 @@ Flyway integration has been removed. Use external migration tools:
 - **Migratus** - Clojure migration library
 - **Manual SQL** - For simple schemas
 
-The auto-schema generation (`:sql/auto-create-missing?`) has been removed.
+The auto-schema generation (`:sql/auto-create-missing?`) is still available for development use.
 
 ## Plugin Configuration
 
