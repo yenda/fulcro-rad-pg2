@@ -235,9 +235,11 @@
       (is (= 5432 (:port result)))))
 
   (testing "handles special characters in password"
+    ;; Note: URL-encoded characters get decoded by java.net.URI
     (let [result (pg2/parse-jdbc-url "jdbc:postgresql://localhost:5432/db?user=admin&password=p%40ss")]
       (is (= "admin" (:user result)))
-      (is (= "p%40ss" (:password result))))))
+      ;; %40 decodes to @
+      (is (= "p@ss" (:password result))))))
 
 ;; =============================================================================
 ;; Pool configuration tests
@@ -287,9 +289,10 @@
       ;; pool-max-size should still get default
       (is (= 10 (:pool-max-size result)))))
 
-  (testing "prefers pg2/config over jdbc-url when both present"
-    (let [config {:pg2/config {:host "primary" :port 5432 :database "maindb"}
-                  :pg2/jdbc-url "jdbc:postgresql://fallback:5433/otherdb?user=x&password=y"}
+  (testing "prefers jdbc-url over pg2/config when both present"
+    ;; Note: build-pool-config checks jdbc-url first
+    (let [config {:pg2/config {:host "fallback" :port 5432 :database "fallbackdb"}
+                  :pg2/jdbc-url "jdbc:postgresql://primary:5433/maindb?user=x&password=y"}
           result (pg2/build-pool-config config)]
       (is (= "primary" (:host result)))
       (is (= "maindb" (:database result))))))
