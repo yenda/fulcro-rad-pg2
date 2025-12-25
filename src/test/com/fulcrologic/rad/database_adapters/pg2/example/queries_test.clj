@@ -896,3 +896,109 @@
       (is (= "Empty Comments Issue" (:issue/title result)))
       (is (= [] (:issue/comments result))
           "Empty to-many should return empty vector"))))
+
+;; =============================================================================
+;; UPDATE OPERATION TESTS
+;;
+;; Tests for updating existing entities - scalar values, refs, and partial updates
+;; =============================================================================
+
+(deftest update-scalar-values-test
+  (testing "Update scalar values on existing entity"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "update-test@example.com"}
+                                             :user/username {:after "updatetest"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Update Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Update Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Original Title"}
+                                               :issue/description {:after "Original description"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/priority {:after :issue.priority/low}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Verify original values
+          before (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title :issue/description :issue/status :issue/priority])
+          _ (is (= "Original Title" (:issue/title before)))
+          _ (is (= :issue.status/open (:issue/status before)))
+          _ (is (= :issue.priority/low (:issue/priority before)))
+
+          ;; Update multiple scalar values
+          _ (save! {[:issue/id issue-id]
+                    {:issue/title {:before "Original Title" :after "Updated Title"}
+                     :issue/description {:before "Original description" :after "Updated description"}
+                     :issue/status {:before :issue.status/open :after :issue.status/in-progress}
+                     :issue/priority {:before :issue.priority/low :after :issue.priority/critical}}})
+
+          ;; Verify updated values
+          after (run-query-with-ident [:issue/id issue-id]
+                                      [:issue/title :issue/description :issue/status :issue/priority])]
+
+      (is (= "Updated Title" (:issue/title after)))
+      (is (= "Updated description" (:issue/description after)))
+      (is (= :issue.status/in-progress (:issue/status after)))
+      (is (= :issue.priority/critical (:issue/priority after))))))
+
+(deftest update-to-one-ref-test
+  (testing "Update to-one reference (re-parenting)"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "reparent@example.com"}
+                                             :user/username {:after "reparenttest"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Reparent Org"}}))
+          project-a-id (create! :project/id (fn [_] {:project/name {:after "Project A"}
+                                                     :project/organization {:after [:organization/id org-id]}}))
+          project-b-id (create! :project/id (fn [_] {:project/name {:after "Project B"}
+                                                     :project/organization {:after [:organization/id org-id]}}))
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Reparent Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-a-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Verify original project
+          before (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title {:issue/project [:project/name]}])
+          _ (is (= "Project A" (-> before :issue/project :project/name)))
+
+          ;; Move issue to different project
+          _ (save! {[:issue/id issue-id]
+                    {:issue/project {:before [:project/id project-a-id]
+                                     :after [:project/id project-b-id]}}})
+
+          ;; Verify new project
+          after (run-query-with-ident [:issue/id issue-id]
+                                      [:issue/title {:issue/project [:project/name]}])]
+
+      (is (= "Project B" (-> after :issue/project :project/name))))))
+
+(deftest update-partial-fields-test
+  (testing "Partial update - only specified fields change"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "partial@example.com"}
+                                             :user/username {:after "partialtest"}
+                                             :user/display-name {:after "Original Display Name"}
+                                             :user/active? {:after true}}))
+
+          ;; Verify original values
+          before (run-query-with-ident [:user/id user-id]
+                                       [:user/username :user/display-name :user/active?])
+          _ (is (= "partialtest" (:user/username before)))
+          _ (is (= "Original Display Name" (:user/display-name before)))
+          _ (is (= true (:user/active? before)))
+
+          ;; Update only display-name, leave other fields unchanged
+          _ (save! {[:user/id user-id]
+                    {:user/display-name {:before "Original Display Name"
+                                         :after "New Display Name"}}})
+
+          ;; Verify only display-name changed
+          after (run-query-with-ident [:user/id user-id]
+                                      [:user/username :user/display-name :user/active?])]
+
+      (is (= "partialtest" (:user/username after)) "Username should remain unchanged")
+      (is (= "New Display Name" (:user/display-name after)) "Display name should be updated")
+      (is (= true (:user/active? after)) "Active status should remain unchanged"))))

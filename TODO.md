@@ -34,26 +34,13 @@ To-many relationships with no results now correctly return `{:attr-key []}` inst
 
 ## Missing Test Coverage
 
-### 3. Update operations
+### 3. ~~Update operations~~ DONE
 
-**Priority:** High
-
-No tests verify that updating existing entities works correctly:
-- Changing scalar values
-- Changing ref values (re-parenting)
-- Partial updates (only some fields)
-
-**Test cases needed:**
-```clojure
-(deftest update-scalar-values-test
-  ;; Change issue title, status, priority
-  )
-
-(deftest update-ref-values-test
-  ;; Move issue to different project
-  ;; Change issue reporter
-  )
-```
+**Status:** DONE
+**Tests added:**
+- `update-scalar-values-test` - Verifies updating multiple scalar fields (title, status, priority)
+- `update-to-one-ref-test` - Verifies re-parenting (moving issue to different project)
+- `update-partial-fields-test` - Verifies partial updates only change specified fields
 
 ---
 
