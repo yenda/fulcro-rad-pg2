@@ -2588,3 +2588,204 @@
 
       (is (= "Issue with B" (:issue/title issue2-result)))
       (is (= "label-b" (-> issue2-result :issue/labels first :issue-label/label :label/name))))))
+
+;; =============================================================================
+;; SCHEMA INTROSPECTION TESTS
+;;
+;; Verify generated schema matches expectations by querying pg_catalog
+;; =============================================================================
+
+(deftest schema-column-types-uuid-test
+  (testing "UUID identity columns have correct type"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT column_name, data_type, udt_name
+                                      FROM information_schema.columns
+                                      WHERE table_schema = ? AND table_name = 'organizations' AND column_name = 'id'"
+                                     schema])]
+      (is (= "id" (:columns/column_name result)))
+      (is (= "uuid" (:columns/udt_name result))))))
+
+(deftest schema-column-types-bigint-test
+  (testing "Long identity columns have correct type (BIGINT)"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT column_name, data_type, udt_name
+                                      FROM information_schema.columns
+                                      WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'id'"
+                                     schema])]
+      (is (= "id" (:columns/column_name result)))
+      (is (= "int8" (:columns/udt_name result)) "issue.id should be BIGINT (int8)"))))
+
+(deftest schema-column-types-varchar-test
+  (testing "String columns have VARCHAR type with correct length"
+    (let [schema (:schema *test-env*)
+          ;; Default VARCHAR(200) for keyword
+          status-col (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                        ["SELECT column_name, character_maximum_length
+                                          FROM information_schema.columns
+                                          WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'status'"
+                                         schema])
+          ;; Check VARCHAR(50) for label name with max-length
+          label-name-col (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                            ["SELECT column_name, character_maximum_length
+                                              FROM information_schema.columns
+                                              WHERE table_schema = ? AND table_name = 'labels' AND column_name = 'name'"
+                                             schema])]
+      ;; Keywords use VARCHAR(200) by default
+      (is (= 200 (:columns/character_maximum_length status-col)))
+      ;; label/name has ::pg2/max-length 50
+      (is (= 50 (:columns/character_maximum_length label-name-col))))))
+
+(deftest schema-column-types-boolean-test
+  (testing "Boolean columns have correct type"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT column_name, data_type, udt_name
+                                      FROM information_schema.columns
+                                      WHERE table_schema = ? AND table_name = 'users' AND column_name = 'is_active'"
+                                     schema])]
+      (is (= "is_active" (:columns/column_name result)))
+      (is (= "bool" (:columns/udt_name result))))))
+
+(deftest schema-column-types-timestamp-test
+  (testing "Instant columns have TIMESTAMP WITH TIME ZONE type"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT column_name, data_type, udt_name
+                                      FROM information_schema.columns
+                                      WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'created_at'"
+                                     schema])]
+      (is (= "created_at" (:columns/column_name result)))
+      (is (= "timestamptz" (:columns/udt_name result))))))
+
+(deftest schema-column-types-decimal-test
+  (testing "Decimal columns have DECIMAL type"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT column_name, data_type, udt_name
+                                      FROM information_schema.columns
+                                      WHERE table_schema = ? AND table_name = 'projects' AND column_name = 'budget'"
+                                     schema])]
+      (is (= "budget" (:columns/column_name result)))
+      (is (= "numeric" (:columns/udt_name result))))))
+
+(deftest schema-column-types-int-test
+  (testing "Int columns have INTEGER type"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT column_name, data_type, udt_name
+                                      FROM information_schema.columns
+                                      WHERE table_schema = ? AND table_name = 'labels' AND column_name = 'position'"
+                                     schema])]
+      (is (= "position" (:columns/column_name result)))
+      (is (= "int4" (:columns/udt_name result))))))
+
+(deftest schema-sequence-exists-for-long-identity-test
+  (testing "Sequence created for long identity column"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                    ["SELECT sequence_name FROM information_schema.sequences
+                                      WHERE sequence_schema = ? AND sequence_name = 'issues_id_seq'"
+                                     schema])]
+      (is (some? result) "Sequence issues_id_seq should exist")
+      (is (= "issues_id_seq" (:sequences/sequence_name result))))))
+
+(deftest schema-no-sequence-for-uuid-identity-test
+  (testing "No sequence created for UUID identity columns"
+    (let [schema (:schema *test-env*)
+          result (jdbc/execute! (:jdbc-conn *test-env*)
+                                ["SELECT sequence_name FROM information_schema.sequences
+                                  WHERE sequence_schema = ? AND sequence_name = 'organizations_id_seq'"
+                                 schema])]
+      (is (empty? result) "No sequence should exist for UUID identity"))))
+
+(deftest schema-index-on-identity-column-test
+  (testing "Index created on identity columns"
+    (let [schema (:schema *test-env*)
+          ;; Check index on issues.id (long identity)
+          issue-idx (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT indexname FROM pg_indexes
+                                         WHERE schemaname = ? AND tablename = 'issues' AND indexname = 'issues_id_idx'"
+                                        schema])
+          ;; Check index on organizations.id (uuid identity)
+          org-idx (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                     ["SELECT indexname FROM pg_indexes
+                                       WHERE schemaname = ? AND tablename = 'organizations' AND indexname = 'organizations_id_idx'"
+                                      schema])]
+      (is (some? issue-idx) "issues_id_idx should exist")
+      (is (some? org-idx) "organizations_id_idx should exist"))))
+
+(deftest schema-fk-constraints-exist-test
+  (testing "Foreign key constraints exist on reference columns"
+    (let [schema (:schema *test-env*)
+          ;; Check FK from issues.project to projects.id
+          ;; Query ccu.table_name directly (no alias) - next.jdbc uses :constraint_column_usage/table_name
+          issue-project-fk (jdbc/execute-one!
+                            (:jdbc-conn *test-env*)
+                            ["SELECT tc.constraint_name, tc.constraint_type,
+                                     kcu.column_name, ccu.table_name
+                              FROM information_schema.table_constraints tc
+                              JOIN information_schema.key_column_usage kcu
+                                ON tc.constraint_name = kcu.constraint_name
+                                AND tc.table_schema = kcu.table_schema
+                              JOIN information_schema.constraint_column_usage ccu
+                                ON tc.constraint_name = ccu.constraint_name
+                                AND tc.table_schema = ccu.table_schema
+                              WHERE tc.table_schema = ?
+                                AND tc.table_name = 'issues'
+                                AND tc.constraint_type = 'FOREIGN KEY'
+                                AND kcu.column_name = 'project'"
+                             schema])]
+      (is (some? issue-project-fk) "FK constraint on issues.project should exist")
+      (is (= "projects" (:constraint_column_usage/table_name issue-project-fk))))))
+
+(deftest schema-fk-index-on-reference-column-test
+  (testing "Index created on FK reference columns"
+    (let [schema (:schema *test-env*)
+          ;; Check index on issues.project
+          project-idx (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                         ["SELECT indexname FROM pg_indexes
+                                           WHERE schemaname = ? AND tablename = 'issues' AND indexname = 'project_idx'"
+                                          schema])]
+      (is (some? project-idx) "project_idx should exist on issues table"))))
+
+(deftest schema-multiple-fk-constraints-test
+  (testing "Multiple FK constraints on table with multiple refs"
+    (let [schema (:schema *test-env*)
+          ;; issues has reporter_id, project, milestone, parent_id
+          fk-constraints (jdbc/execute!
+                          (:jdbc-conn *test-env*)
+                          ["SELECT kcu.column_name, ccu.table_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu
+                              ON tc.constraint_name = kcu.constraint_name
+                              AND tc.table_schema = kcu.table_schema
+                            JOIN information_schema.constraint_column_usage ccu
+                              ON tc.constraint_name = ccu.constraint_name
+                              AND tc.table_schema = ccu.table_schema
+                            WHERE tc.table_schema = ?
+                              AND tc.table_name = 'issues'
+                              AND tc.constraint_type = 'FOREIGN KEY'"
+                           schema])
+          fk-map (into {} (map (juxt :key_column_usage/column_name :constraint_column_usage/table_name) fk-constraints))]
+      ;; Check expected FK relationships
+      (is (= "projects" (get fk-map "project")))
+      (is (= "users" (get fk-map "reporter_id")))
+      ;; milestone and parent_id are nullable refs - they should also have FK constraints
+      )))
+
+(deftest schema-all-expected-tables-exist-test
+  (testing "All expected tables from model are created"
+    (let [schema (:schema *test-env*)
+          expected-tables #{"organizations" "teams" "team_members" "users" "api_tokens"
+                            "notifications" "projects" "project_members" "webhooks"
+                            "labels" "milestones" "issues" "issue_labels" "issue_watchers"
+                            "issue_assignees" "comments" "reactions" "attachments" "time_entries"}
+          actual-tables (jdbc/execute! (:jdbc-conn *test-env*)
+                                       ["SELECT table_name FROM information_schema.tables
+                                         WHERE table_schema = ? AND table_type = 'BASE TABLE'"
+                                        schema])
+          actual-set (set (map :tables/table_name actual-tables))]
+      (doseq [table expected-tables]
+        (is (contains? actual-set table) (str "Table " table " should exist"))))))

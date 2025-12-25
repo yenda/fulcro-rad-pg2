@@ -159,15 +159,24 @@ Note: `delete-orphan?` already tested extensively in `delete_orphan_edge_cases_t
 
 ## Automigration Testing
 
-### 12. Schema introspection tests
+### 12. ~~Schema introspection tests~~ DONE
 
-**Priority:** Medium
-
-Verify generated schema matches expectations by querying `pg_catalog`:
-- Column types match `sql-type` output (e.g., `VARCHAR(200)`, `UUID`, `BIGINT`)
-- Sequences created for int/long identity columns
-- Indexes created for identity columns
-- Foreign key references exist
+**Status:** DONE
+**Tests added:**
+- `schema-column-types-uuid-test` - UUID identity columns have `uuid` type
+- `schema-column-types-bigint-test` - Long identity columns have `int8` (BIGINT) type
+- `schema-column-types-varchar-test` - VARCHAR with correct max-length (200 default, 50 for label/name)
+- `schema-column-types-boolean-test` - Boolean columns have `bool` type
+- `schema-column-types-timestamp-test` - Instant columns have `timestamptz` type
+- `schema-column-types-decimal-test` - Decimal columns have `numeric` type
+- `schema-column-types-int-test` - Int columns have `int4` (INTEGER) type
+- `schema-sequence-exists-for-long-identity-test` - Sequences created for long identity columns
+- `schema-no-sequence-for-uuid-identity-test` - No sequences for UUID identity columns
+- `schema-index-on-identity-column-test` - Indexes on identity columns
+- `schema-fk-constraints-exist-test` - FK constraints exist on reference columns
+- `schema-fk-index-on-reference-column-test` - Indexes on FK reference columns
+- `schema-multiple-fk-constraints-test` - Multiple FK constraints on tables with multiple refs
+- `schema-all-expected-tables-exist-test` - All expected tables from model are created
 
 ### 13. Constraint verification tests
 
