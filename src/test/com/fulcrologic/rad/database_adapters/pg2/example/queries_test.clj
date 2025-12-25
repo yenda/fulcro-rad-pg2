@@ -1119,3 +1119,113 @@
 
       (is (nil? (first (vals after-db)))
           "Optional to-one ref should be clearable to nil"))))
+
+;; =============================================================================
+;; BATCH RESOLVER TESTS
+;;
+;; Tests verifying batch resolvers correctly fetch multiple entities
+;; =============================================================================
+
+(deftest batch-resolution-multiple-entities-test
+  (testing "Batch resolver fetches multiple entities with correct data association"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "batch@example.com"}
+                                             :user/username {:after "batchtest"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Batch Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Batch Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create 10 issues with unique titles and priorities
+          issue-ids (vec (for [i (range 10)]
+                           (create! :issue/id (fn [_] {:issue/title {:after (str "Issue " i)}
+                                                       :issue/status {:after :issue.status/open}
+                                                       :issue/type {:after :issue.type/task}
+                                                       :issue/priority-order {:after i}
+                                                       :issue/project {:after [:project/id project-id]}
+                                                       :issue/reporter {:after [:user/id user-id]}
+                                                       :issue/created-at {:after (now)}}))))
+
+          ;; Query all 10 issues in a single batch query
+          results (run-query (vec (for [id issue-ids]
+                                    {[:issue/id id] [:issue/title :issue/priority-order]})))]
+
+      ;; Verify each issue has correct data
+      (doseq [[i id] (map-indexed vector issue-ids)]
+        (let [result (get results [:issue/id id])]
+          (is (= (str "Issue " i) (:issue/title result))
+              (str "Issue " i " should have correct title"))
+          (is (= i (:issue/priority-order result))
+              (str "Issue " i " should have correct priority-order")))))))
+
+(deftest batch-resolution-with-joins-test
+  (testing "Batch resolver handles joins correctly for multiple entities"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "batchjoin@example.com"}
+                                             :user/username {:after "batchjointest"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Batch Join Org"}}))
+
+          ;; Create 3 projects
+          project-ids (vec (for [i (range 3)]
+                             (create! :project/id (fn [_] {:project/name {:after (str "Project " i)}
+                                                           :project/organization {:after [:organization/id org-id]}}))))
+
+          ;; Create 2 issues per project (6 total)
+          issue-ids (vec (for [pi (range 3)
+                               ii (range 2)]
+                           (create! :issue/id (fn [_] {:issue/title {:after (str "Issue P" pi "-" ii)}
+                                                       :issue/status {:after :issue.status/open}
+                                                       :issue/type {:after :issue.type/task}
+                                                       :issue/project {:after [:project/id (nth project-ids pi)]}
+                                                       :issue/reporter {:after [:user/id user-id]}
+                                                       :issue/created-at {:after (now)}}))))
+
+          ;; Query all issues with their project names
+          results (run-query (vec (for [id issue-ids]
+                                    {[:issue/id id] [:issue/title {:issue/project [:project/name]}]})))]
+
+      ;; Verify each issue is associated with correct project
+      (doseq [[idx id] (map-indexed vector issue-ids)]
+        (let [result (get results [:issue/id id])
+              expected-project-idx (quot idx 2)]
+          (is (= (str "Project " expected-project-idx)
+                 (-> result :issue/project :project/name))
+              (str "Issue " idx " should be linked to Project " expected-project-idx)))))))
+
+(deftest batch-to-many-resolution-test
+  (testing "Batch to-many resolver returns correct children for each parent"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "batchtomany@example.com"}
+                                             :user/username {:after "batchtomany"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Batch To-Many Org"}}))
+
+          ;; Create 3 projects with different numbers of issues
+          project-ids (vec (for [_ (range 3)]
+                             (create! :project/id (fn [_] {:project/name {:after "Project"}
+                                                           :project/organization {:after [:organization/id org-id]}}))))
+
+          ;; Create issues: 2 for project 0, 3 for project 1, 0 for project 2
+          _ (dotimes [_ 2]
+              (create! :issue/id (fn [_] {:issue/title {:after "P0 Issue"}
+                                          :issue/status {:after :issue.status/open}
+                                          :issue/type {:after :issue.type/task}
+                                          :issue/project {:after [:project/id (nth project-ids 0)]}
+                                          :issue/reporter {:after [:user/id user-id]}
+                                          :issue/created-at {:after (now)}})))
+          _ (dotimes [_ 3]
+              (create! :issue/id (fn [_] {:issue/title {:after "P1 Issue"}
+                                          :issue/status {:after :issue.status/open}
+                                          :issue/type {:after :issue.type/task}
+                                          :issue/project {:after [:project/id (nth project-ids 1)]}
+                                          :issue/reporter {:after [:user/id user-id]}
+                                          :issue/created-at {:after (now)}})))
+
+          ;; Query all projects with their issues
+          results (run-query (vec (for [id project-ids]
+                                    {[:project/id id] [:project/name {:project/issues [:issue/title]}]})))]
+
+      (is (= 2 (count (-> results (get [:project/id (nth project-ids 0)]) :project/issues)))
+          "Project 0 should have 2 issues")
+      (is (= 3 (count (-> results (get [:project/id (nth project-ids 1)]) :project/issues)))
+          "Project 1 should have 3 issues")
+      (is (= 0 (count (-> results (get [:project/id (nth project-ids 2)]) :project/issues)))
+          "Project 2 should have 0 issues (empty vector)"))))
