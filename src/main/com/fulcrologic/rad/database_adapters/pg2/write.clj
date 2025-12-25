@@ -22,7 +22,7 @@
    [pg.pool :as pg.pool]
    [taoensso.timbre :as log])
   (:import
-   (org.postgresql.util PSQLException)))
+   (org.pg.error PGErrorResponse)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Pure: Value Transformation
@@ -298,8 +298,8 @@
 
 (defn error-condition
   "Map PostgreSQL error code to semantic condition."
-  [^PSQLException e]
-  (case (.getSQLState e)
+  [^PGErrorResponse e]
+  (case (.getCode e)
     "08003" ::connection-does-not-exist
     "22001" ::string-data-too-long
     "22021" ::invalid-encoding
@@ -312,20 +312,20 @@
     ::unknown))
 
 (defn- wrap-save-error
-  "Wrap PSQLException in ex-info with structured data."
-  [^PSQLException e]
+  "Wrap PGErrorResponse in ex-info with structured data."
+  [^PGErrorResponse e]
   (let [condition (error-condition e)]
     (ex-info (str "save-form! failed: " (name condition))
              {:type ::save-error
               :cause condition
-              :sql-state (.getSQLState e)
+              :sql-state (.getCode e)
               :message (.getMessage e)}
              e)))
 
 (defn- retryable?
   "Check if an exception is retryable (serialization failure)."
   [_ e]
-  (and (instance? PSQLException e)
+  (and (instance? PGErrorResponse e)
        (= ::serialization-failure (error-condition e))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -389,5 +389,5 @@
          {:tempids {}}
          connection-pools))
 
-      (catch PSQLException e
+      (catch PGErrorResponse e
         (throw (wrap-save-error e))))))

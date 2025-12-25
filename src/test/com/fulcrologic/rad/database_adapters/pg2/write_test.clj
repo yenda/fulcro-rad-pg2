@@ -10,7 +10,8 @@
    [com.fulcrologic.rad.database-adapters.pg2 :as rad.pg2]
    [com.fulcrologic.rad.database-adapters.pg2.write :as write])
   (:import
-   [org.postgresql.util PSQLException PSQLState]))
+   [org.pg.error PGErrorResponse]
+   [org.pg.msg.server ErrorResponse]))
 
 ;; =============================================================================
 ;; Test Attribute Definitions (minimal, for unit testing)
@@ -444,56 +445,58 @@
 ;; error-condition Tests
 ;; =============================================================================
 
-;; Use proxy to create a mock PSQLException that returns the desired SQL state
-(defn make-psql-exception
-  "Create a mock PSQLException with the given SQL state for testing."
-  [sql-state]
-  (proxy [PSQLException] ["Test error" PSQLState/UNKNOWN_STATE]
-    (getSQLState [] sql-state)))
+;; Create PGErrorResponse with the desired error code for testing
+(defn make-pg-error
+  "Create a PGErrorResponse with the given error code for testing."
+  [error-code]
+  (let [err-map {"code" error-code
+                 "message" "test error"
+                 "severity" "ERROR"}]
+    (PGErrorResponse. (ErrorResponse. err-map))))
 
 (deftest error-condition-connection-error
   (testing "maps 08003 to connection-does-not-exist"
-    (let [e (make-psql-exception "08003")]
+    (let [e (make-pg-error "08003")]
       (is (= ::write/connection-does-not-exist (write/error-condition e))))))
 
 (deftest error-condition-data-errors
   (testing "maps 22001 to string-data-too-long"
-    (let [e (make-psql-exception "22001")]
+    (let [e (make-pg-error "22001")]
       (is (= ::write/string-data-too-long (write/error-condition e)))))
 
   (testing "maps 22021 to invalid-encoding"
-    (let [e (make-psql-exception "22021")]
+    (let [e (make-pg-error "22021")]
       (is (= ::write/invalid-encoding (write/error-condition e)))))
 
   (testing "maps 22P02 to invalid-text-representation"
-    (let [e (make-psql-exception "22P02")]
+    (let [e (make-pg-error "22P02")]
       (is (= ::write/invalid-text-representation (write/error-condition e))))))
 
 (deftest error-condition-constraint-violations
   (testing "maps 23502 to not-null-violation"
-    (let [e (make-psql-exception "23502")]
+    (let [e (make-pg-error "23502")]
       (is (= ::write/not-null-violation (write/error-condition e)))))
 
   (testing "maps 23505 to unique-violation"
-    (let [e (make-psql-exception "23505")]
+    (let [e (make-pg-error "23505")]
       (is (= ::write/unique-violation (write/error-condition e)))))
 
   (testing "maps 23514 to check-violation"
-    (let [e (make-psql-exception "23514")]
+    (let [e (make-pg-error "23514")]
       (is (= ::write/check-violation (write/error-condition e))))))
 
 (deftest error-condition-transaction-errors
   (testing "maps 40001 to serialization-failure"
-    (let [e (make-psql-exception "40001")]
+    (let [e (make-pg-error "40001")]
       (is (= ::write/serialization-failure (write/error-condition e)))))
 
   (testing "maps 57014 to timeout"
-    (let [e (make-psql-exception "57014")]
+    (let [e (make-pg-error "57014")]
       (is (= ::write/timeout (write/error-condition e))))))
 
 (deftest error-condition-unknown
   (testing "maps unknown codes to ::unknown"
-    (let [e (make-psql-exception "99999")]
+    (let [e (make-pg-error "99999")]
       (is (= ::write/unknown (write/error-condition e))))))
 
 ;; =============================================================================

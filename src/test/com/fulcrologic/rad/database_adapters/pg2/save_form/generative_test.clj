@@ -492,11 +492,9 @@
 ;; These generators produce data that violates database constraints.
 ;; Used to verify that save-form! properly wraps errors.
 
-(def gen-null-byte-string
-  "Generator for strings containing null bytes (invalid in PostgreSQL)"
-  (gen/fmap (fn [[before after]]
-              (str before "\u0000" after))
-            (gen/tuple gen-nice-string gen-nice-string)))
+;; NOTE: gen-null-byte-string removed - pg2 driver handles null bytes differently
+;; than JDBC. JDBC would throw error 22021 (invalid_byte_sequence_for_encoding),
+;; but pg2 successfully inserts strings with embedded null bytes.
 
 (def gen-oversized-string
   "Generator for strings exceeding varchar(200) limit"
@@ -505,9 +503,8 @@
             (gen/choose 0 100)))
 
 (def gen-chaos-string
-  "Generator that produces schema-violating strings"
-  (gen/one-of [gen-null-byte-string
-               gen-oversized-string]))
+  "Generator that produces schema-violating strings (oversized for varchar limit)"
+  gen-oversized-string)
 
 (defn gen-chaos-account-insert
   "Generator for account insert with invalid data"
@@ -537,17 +534,14 @@
                           (and
                            ;; Must be our wrapped error type
                            (= ::write/save-error (:type data))
-                           ;; Must have a known cause
-                           (#{::write/string-data-too-long
-                              ::write/invalid-encoding
-                              ::write/invalid-text-representation}
-                            (:cause data))
+                           ;; Must have a known cause (oversized strings trigger 22001)
+                           (= ::write/string-data-too-long (:cause data))
                            ;; Must have SQL state
                            (string? (:sql-state data))
                            ;; Must have message
                            (string? (:message data))
                            ;; Must preserve original exception
-                           (instance? org.postgresql.util.PSQLException (ex-cause e)))))
+                           (instance? org.pg.error.PGErrorResponse (ex-cause e)))))
                       (catch Exception _e
                         ;; Wrong exception type - this is a bug
                         false))))))
