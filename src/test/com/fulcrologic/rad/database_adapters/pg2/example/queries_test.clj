@@ -767,6 +767,220 @@
              (mapv :label/name (:project/labels query-result)))))))
 
 ;; =============================================================================
+;; ORDER-BY EDGE CASE TESTS
+;;
+;; Tests for edge cases in to-many ordering
+;; =============================================================================
+
+(deftest order-by-with-null-values-test
+  (testing "NULL values in order-by column"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Null Order Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Null Order Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create labels - some with nil position
+          _ (create! :label/id (fn [_] {:label/name {:after "Has Position 2"}
+                                        :label/position {:after 2}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "No Position A"}
+                                        ;; No position - will be NULL
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Has Position 1"}
+                                        :label/position {:after 1}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "No Position B"}
+                                        ;; No position - will be NULL
+                                        :label/project {:after [:project/id project-id]}}))
+
+          query-result (run-query-with-ident
+                        [:project/id project-id]
+                        [:project/name
+                         {:project/labels [:label/name :label/position]}])
+          labels (:project/labels query-result)
+          names (mapv :label/name labels)]
+
+      ;; Non-null values should come first (ordered), then NULLs
+      ;; PostgreSQL default: NULLS LAST for ASC order
+      (is (= 4 (count labels)) "Should have 4 labels")
+      (is (= "Has Position 1" (first names)) "Position 1 should be first")
+      (is (= "Has Position 2" (second names)) "Position 2 should be second")
+      ;; NULLs come last (order among NULLs is undefined)
+      (is (nil? (:label/position (nth labels 2))) "Third should have nil position")
+      (is (nil? (:label/position (nth labels 3))) "Fourth should have nil position"))))
+
+(deftest order-by-duplicate-values-test
+  (testing "Duplicate values in order-by column maintain stable ordering"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Dupe Order Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Dupe Order Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create labels with duplicate positions
+          _ (create! :label/id (fn [_] {:label/name {:after "First at 1"}
+                                        :label/position {:after 1}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Second at 1"}
+                                        :label/position {:after 1}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "At Position 2"}
+                                        :label/position {:after 2}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Third at 1"}
+                                        :label/position {:after 1}
+                                        :label/project {:after [:project/id project-id]}}))
+
+          query-result (run-query-with-ident
+                        [:project/id project-id]
+                        [:project/name
+                         {:project/labels [:label/name :label/position]}])
+          labels (:project/labels query-result)
+          positions (mapv :label/position labels)]
+
+      (is (= 4 (count labels)) "Should have 4 labels")
+      ;; All position=1 items should come before position=2
+      (is (= [1 1 1 2] positions) "Positions should be sorted ascending")
+      ;; The last one should be "At Position 2"
+      (is (= "At Position 2" (:label/name (last labels)))))))
+
+(deftest order-by-with-large-dataset-test
+  (testing "Order-by works correctly with many items"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Large Order Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Large Order Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create 20 labels in reverse order
+          _ (doseq [i (reverse (range 1 21))]
+              (create! :label/id (fn [_] {:label/name {:after (str "Label " (format "%02d" i))}
+                                          :label/position {:after i}
+                                          :label/project {:after [:project/id project-id]}})))
+
+          query-result (run-query-with-ident
+                        [:project/id project-id]
+                        [:project/name
+                         {:project/labels [:label/name :label/position]}])
+          labels (:project/labels query-result)
+          positions (mapv :label/position labels)]
+
+      (is (= 20 (count labels)) "Should have 20 labels")
+      (is (= (range 1 21) positions) "Positions should be sorted 1-20")
+      (is (= "Label 01" (:label/name (first labels))) "First should be Label 01")
+      (is (= "Label 20" (:label/name (last labels))) "Last should be Label 20"))))
+
+(deftest order-by-empty-collection-test
+  (testing "Order-by with no matching items returns empty vector"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Empty Order Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Empty Order Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Don't create any labels
+
+          query-result (run-query-with-ident
+                        [:project/id project-id]
+                        [:project/name
+                         {:project/labels [:label/name :label/position]}])
+          labels (:project/labels query-result)]
+
+      (is (= [] labels) "Empty project should return empty labels vector"))))
+
+(deftest order-by-single-item-test
+  (testing "Order-by with single item"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Single Order Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Single Order Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create single label
+          _ (create! :label/id (fn [_] {:label/name {:after "Only Label"}
+                                        :label/position {:after 5}
+                                        :label/project {:after [:project/id project-id]}}))
+
+          query-result (run-query-with-ident
+                        [:project/id project-id]
+                        [:project/name
+                         {:project/labels [:label/name :label/position]}])
+          labels (:project/labels query-result)]
+
+      (is (= 1 (count labels)) "Should have 1 label")
+      (is (= "Only Label" (:label/name (first labels))))
+      (is (= 5 (:label/position (first labels)))))))
+
+(deftest order-by-negative-positions-test
+  (testing "Order-by with negative position values"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Negative Order Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Negative Order Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create labels with negative, zero, and positive positions
+          _ (create! :label/id (fn [_] {:label/name {:after "Positive 10"}
+                                        :label/position {:after 10}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Negative -5"}
+                                        :label/position {:after -5}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Zero"}
+                                        :label/position {:after 0}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Negative -10"}
+                                        :label/position {:after -10}
+                                        :label/project {:after [:project/id project-id]}}))
+
+          query-result (run-query-with-ident
+                        [:project/id project-id]
+                        [:project/name
+                         {:project/labels [:label/name :label/position]}])
+          labels (:project/labels query-result)
+          positions (mapv :label/position labels)]
+
+      (is (= 4 (count labels)) "Should have 4 labels")
+      (is (= [-10 -5 0 10] positions) "Positions should be sorted including negatives")
+      (is (= "Negative -10" (:label/name (first labels))))
+      (is (= "Positive 10" (:label/name (last labels)))))))
+
+(deftest order-by-batch-multiple-parents-test
+  (testing "Order-by works correctly when batch-fetching from multiple parents"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Batch Order Org"}}))
+
+          ;; Create 3 projects
+          project-ids (vec (for [i (range 3)]
+                             (create! :project/id (fn [_] {:project/name {:after (str "Project " i)}
+                                                           :project/organization {:after [:organization/id org-id]}}))))
+
+          ;; Create labels for each project (in different orders)
+          ;; Project 0: C(3), A(1), B(2)
+          _ (create! :label/id (fn [_] {:label/name {:after "P0-C"} :label/position {:after 3}
+                                        :label/project {:after [:project/id (nth project-ids 0)]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "P0-A"} :label/position {:after 1}
+                                        :label/project {:after [:project/id (nth project-ids 0)]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "P0-B"} :label/position {:after 2}
+                                        :label/project {:after [:project/id (nth project-ids 0)]}}))
+
+          ;; Project 1: Y(2), Z(3), X(1)
+          _ (create! :label/id (fn [_] {:label/name {:after "P1-Y"} :label/position {:after 2}
+                                        :label/project {:after [:project/id (nth project-ids 1)]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "P1-Z"} :label/position {:after 3}
+                                        :label/project {:after [:project/id (nth project-ids 1)]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "P1-X"} :label/position {:after 1}
+                                        :label/project {:after [:project/id (nth project-ids 1)]}}))
+
+          ;; Project 2: only one label
+          _ (create! :label/id (fn [_] {:label/name {:after "P2-Only"} :label/position {:after 1}
+                                        :label/project {:after [:project/id (nth project-ids 2)]}}))
+
+          ;; Batch query all 3 projects
+          results (run-query (vec (for [id project-ids]
+                                    {[:project/id id] [:project/name {:project/labels [:label/name :label/position]}]})))
+
+          p0-labels (-> results (get [:project/id (nth project-ids 0)]) :project/labels)
+          p1-labels (-> results (get [:project/id (nth project-ids 1)]) :project/labels)
+          p2-labels (-> results (get [:project/id (nth project-ids 2)]) :project/labels)]
+
+      ;; Each project's labels should be independently ordered
+      (is (= ["P0-A" "P0-B" "P0-C"] (mapv :label/name p0-labels))
+          "Project 0 labels should be ordered A, B, C")
+      (is (= ["P1-X" "P1-Y" "P1-Z"] (mapv :label/name p1-labels))
+          "Project 1 labels should be ordered X, Y, Z")
+      (is (= ["P2-Only"] (mapv :label/name p2-labels))
+          "Project 2 should have single label"))))
+
+;; =============================================================================
 ;; Test: Alternative 5-Level Path
 ;; Organization → Team → TeamMember → User → Notification
 ;;
