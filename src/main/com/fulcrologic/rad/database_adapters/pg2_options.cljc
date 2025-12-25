@@ -95,9 +95,9 @@
 
    * `:pg2/config` - pg2 connection config (host, port, user, password, database)
    * `:pg2/pool` - pg2 pool options (pool-min-size, pool-max-size)
-   * `:sql/auto-create-missing?` - When true, the adapter will try to generate schema for
+   * `:pg2/auto-create-missing?` - When true, the adapter will try to generate schema for
      defined but missing attributes. NOT recommended for production use.
-   * `:sql/schema` - The RAD schema (you define) that this database should use. Any attribute
+   * `:pg2/schema` - The RAD schema (you define) that this database should use. Any attribute
      with a declared `ao/schema` that matches this should appear in the schema of this database.
 
    For example:
@@ -111,8 +111,8 @@
                           :database \"mydb\"}
              :pg2/pool {:pool-min-size 2
                         :pool-max-size 10}
-             :sql/auto-create-missing? false
-             :sql/schema :production}}
+             :pg2/auto-create-missing? false
+             :pg2/schema :production}}
    ```
    "
   :com.fulcrologic.rad.database-adapters.pg2/databases)

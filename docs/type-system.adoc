@@ -98,7 +98,7 @@ Fulcro Delta
 form->sql-value (write.clj)
     ├─ :ref → extract ID from ident [table id] → id
     ├─ :enum → convert to string via (str value)
-    ├─ custom ::pg2/model->sql-value → apply transformer
+    ├─ custom ::pg2/form->sql-value → apply transformer
     └─ else → pass through unchanged
     │
     ▼
@@ -164,7 +164,7 @@ The pg2 driver handles PostgreSQL types natively without JDBC protocol extension
 
 === Pipeline Asymmetry
 
-IMPORTANT: Write transformers (`::pg2/model->sql-value`) are applied automatically during save operations. However, read transformers (`::pg2/sql->model-value`) are NOT automatically applied. If you need custom deserialization, you must handle it in a custom resolver or manually apply the transformer.
+IMPORTANT: Write transformers (`::pg2/form->sql-value`) are applied automatically during save operations. However, read transformers (`::pg2/sql->form-value`) are NOT automatically applied. If you need custom deserialization, you must handle it in a custom resolver or manually apply the transformer.
 
 == Datomic vs SQL Adapter Comparison
 
@@ -260,9 +260,9 @@ The main way to extend type handling is through attribute-level transformers:
    ::attr/identities #{:app/id}
    ::pg2/max-length 4096
    ;; Write: Clojure map → JSON string
-   ::pg2/model->sql-value j/write-value-as-string
+   ::pg2/form->sql-value j/write-value-as-string
    ;; Read: JSON string → Clojure map
-   ::pg2/sql->model-value j/read-value})
+   ::pg2/sql->form-value j/read-value})
 ----
 
 This approach:
@@ -352,10 +352,9 @@ PostgreSQL enforces type constraints. Errors are caught and wrapped:
 [source,clojure]
 ----
 ;; From write.clj
-(defn error-condition [^PSQLException e]
-  (case (.getSQLState e)
+(defn error-condition [^PGErrorResponse e]
+  (case (.getCode e)
     "22001" ::string-data-too-long      ;; VARCHAR length exceeded
-    "22021" ::invalid-encoding          ;; Null bytes or encoding errors
     "22P02" ::invalid-text-representation ;; Type conversion failed
     "23502" ::not-null-violation        ;; NOT NULL constraint failed
     "23505" ::unique-violation          ;; UNIQUE constraint violated
@@ -410,8 +409,8 @@ PostgreSQL enforces type constraints. Errors are caught and wrapped:
 ┌─────────────────────────────────────────────────────────────┐
 │                    RAD ATTRIBUTE                            │
 │  ::type = :string | :int | :uuid | :ref | :enum | ...      │
-│  ::pg2/model->sql-value = (fn [v] ...)  ; optional         │
-│  ::pg2/sql->model-value = (fn [v] ...)  ; optional         │
+│  ::pg2/form->sql-value = (fn [v] ...)  ; optional          │
+│  ::pg2/sql->form-value = (fn [v] ...)  ; optional          │
 └─────────────────────────────────────────────────────────────┘
                               │
         ┌─────────────────────┴─────────────────────┐
@@ -423,7 +422,7 @@ PostgreSQL enforces type constraints. Errors are caught and wrapped:
 │ (auto-applied)    │                    │ (auto-applied)    │
 │       │           │                    │       │           │
 │       ▼           │                    │       ▼           │
-│ HoneySQL → SQL    │                    │ sql->model-value  │
+│ HoneySQL → SQL    │                    │ sql->form-value   │
 │       │           │                    │ (NOT auto-applied)│
 │       ▼           │                    │                   │
 │ pg2 → PostgreSQL  │                    │                   │
@@ -444,8 +443,8 @@ PostgreSQL enforces type constraints. Errors are caught and wrapped:
 
 1. **Open type system:** RAD types are just keywords - no closed enumeration
 2. **Adapter responsibility:** Each database adapter maps RAD types to native types
-3. **Write transformers auto-apply:** `::pg2/model->sql-value` is called during saves
-4. **Read transformers don't auto-apply:** `::pg2/sql->model-value` must be handled manually
+3. **Write transformers auto-apply:** `::pg2/form->sql-value` is called during saves
+4. **Read transformers don't auto-apply:** `::pg2/sql->form-value` must be handled manually
 5. **Database validates types:** PostgreSQL catches type mismatches, not the adapter
 6. **Extensibility via transformers:** Custom types work best with value transformers
 7. **SQL is a Datomic subset:** All SQL types exist in Datomic, but not vice versa

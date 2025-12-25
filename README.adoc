@@ -88,7 +88,7 @@ RAD attributes that will be used in a PostgreSQL database can be configured as f
 `::attr/identities`:: (required on non-identity attributes) A set of keyword (names) of the id attributes
 that identify tables for which this attribute is a row.
 `::pg2/column-name`:: (optional) A string to use to override the automatic column name.
-`::pg2/table-name`:: (optional, but only on identity attributes) A string. Overrides the table name that goes
+`::pg2/table`:: (optional, but only on identity attributes) A string. Overrides the table name that goes
 with a given identity attribute.
 
 == Resolvers and Save Middleware [[Resolvers]]

@@ -269,14 +269,14 @@
   "Run migrations for all configured databases.
 
    Configuration options per database:
-   - :sql/schema - The RAD schema name (keyword)
-   - :sql/auto-create-missing? - Auto-create tables from attributes (boolean)
+   - :pg2/schema - The RAD schema name (keyword)
+   - :pg2/auto-create-missing? - Auto-create tables from attributes (boolean)
    - :migrations/locations - Vector of migration file locations (strings)
    - :migrations/enabled? - Whether to run migrations (boolean, default true if locations provided)"
   [config all-attributes connection-pools]
   (let [database-map (some-> config ::rad.pg2/databases)]
     (doseq [[dbkey dbconfig] database-map]
-      (let [{:sql/keys [auto-create-missing? schema]
+      (let [{:pg2/keys [auto-create-missing? schema]
              :migrations/keys [locations enabled?]} dbconfig
             pool (get connection-pools dbkey)
             run-migrations? (and (seq locations)

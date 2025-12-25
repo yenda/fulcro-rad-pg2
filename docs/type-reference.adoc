@@ -148,12 +148,12 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.pg2` nam
 |Default ordering for to-many relationships
 |To-many `:ref` attributes
 
-|`::pg2/model->sql-value`
-|Custom transformer function `(fn [clj-value] sql-value)` for writing
+|`::pg2/form->sql-value`
+|Custom transformer function `(fn [clj-value] sql-value)` for writing (also aliased as `model->sql-value` in pg2-options)
 |Any attribute
 
-|`::pg2/sql->model-value`
-|Custom transformer function `(fn [sql-value] clj-value)` for reading
+|`::pg2/sql->form-value`
+|Custom transformer function `(fn [sql-value] clj-value)` for reading (also aliased as `sql->model-value` in pg2-options)
 |Any attribute
 |===
 
@@ -210,8 +210,8 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.pg2` nam
 (defattr user-preferences :user/preferences :string
   {::attr/schema :production
    ::attr/identities #{:user/id}
-   ::pg2/model->sql-value pr-str           ; Clojure map -> EDN string
-   ::pg2/sql->model-value edn/read-string}) ; EDN string -> Clojure map
+   ::pg2/form->sql-value pr-str           ; Clojure map -> EDN string
+   ::pg2/sql->form-value edn/read-string}) ; EDN string -> Clojure map
 ----
 
 == Test Coverage
@@ -346,6 +346,6 @@ The following PostgreSQL types are NOT currently supported by fulcro-rad-pg2:
 
 To use unsupported types, you can:
 
-1. Use `::pg2/model->sql-value` and `::pg2/sql->model-value` transformers to convert between a supported type and your desired representation
+1. Use `::pg2/form->sql-value` and `::pg2/sql->form-value` transformers to convert between a supported type and your desired representation
 2. Store complex data as JSON strings in a `:string` field with custom transformers
 3. Use raw SQL for operations that require native PostgreSQL types

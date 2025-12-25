@@ -13,7 +13,7 @@
    Usage:
    ```clojure
    :com.fulcrologic.rad.database-adapters.pg2/databases
-   {:main {:sql/schema :production
+   {:main {:pg2/schema :production
            :pg2/config {:host \"localhost\"
                         :port 5432
                         :user \"myuser\"
