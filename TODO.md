@@ -202,14 +202,27 @@ VARCHAR max-length verification:
 Index verification:
 - `constraint-index-on-fk-columns-test` - Indexes created on FK reference columns
 
-### 14. Migration diff testing
+### 14. ~~Migration diff testing~~ DONE
 
-**Priority:** Low
+**Status:** DONE
+**Tests added:**
 
-Test incremental schema updates:
-- Existing schema + new attribute → generates ALTER TABLE ADD COLUMN
-- Existing schema + modified attribute → correct behavior (or error)
-- Idempotency: running same migration twice is safe (IF NOT EXISTS)
+Idempotency tests:
+- `migration-idempotency-test` - Re-running automatic-schema is safe (IF NOT EXISTS)
+- `migration-idempotency-tables-unchanged-test` - Table count unchanged after second run
+- `migration-idempotency-columns-unchanged-test` - Column count unchanged after second run
+- `migration-idempotency-indexes-unchanged-test` - Index count unchanged after second run
+
+Schema modification tests:
+- `migration-add-column-to-existing-table-test` - ADD COLUMN IF NOT EXISTS works
+- `migration-add-column-if-not-exists-test` - IF NOT EXISTS on columns
+- `migration-create-table-if-not-exists-test` - IF NOT EXISTS on tables
+- `migration-create-index-if-not-exists-test` - IF NOT EXISTS on indexes
+- `migration-create-sequence-if-not-exists-test` - IF NOT EXISTS on sequences
+
+Edge cases:
+- `migration-modify-column-not-applied-test` - Column type changes not applied (expected)
+- `migration-sql-statements-use-if-not-exists-test` - All SQL statements use IF NOT EXISTS pattern
 
 ---
 
