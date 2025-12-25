@@ -165,14 +165,17 @@
 
 (defn build-pg2-column-config
   "Build the configuration for pg2 zero-copy row transformation.
-   Maps pg2 column keywords directly to output paths and types."
+   Maps pg2 column keywords directly to output paths, types, and custom transformers."
   [column-mapping column->attr]
   (reduce
    (fn [acc [output-path column]]
      (let [attr (get column->attr column)
-           attr-type (when attr (::attr/type attr))]
-       (assoc acc column {:output-path output-path
-                          :type attr-type})))
+           attr-type (when attr (::attr/type attr))
+           ;; Include custom sql->form-value transformer if defined
+           sql->form-value (when attr (::rad.pg2/sql->form-value attr))]
+       (assoc acc column (cond-> {:output-path output-path
+                                  :type attr-type}
+                           sql->form-value (assoc :sql->form-value sql->form-value)))))
    {}
    column-mapping))
 
@@ -265,6 +268,7 @@
              (get-pg-array-type id-attr)
              (some-> order-by k->attr get-column))
        :wrap-targets (fn [targets] {attr-k (mapv (fn [t] {target-k t}) targets)})
+       :empty-result {attr-k []}  ;; Default for IDs with no results
        :outputs [{attr-k [target-k]}]
        :op-name (make-to-many-resolver-name attr-k)
        :id-attr-k id-attr-k
@@ -333,7 +337,7 @@
 (defn to-many-resolver
   "Generate a batch resolver for to-many (reverse) references."
   [attribute id-attr-k k->attr]
-  (when-let [{:keys [sql wrap-targets outputs op-name id-attr-k schema transform]}
+  (when-let [{:keys [sql wrap-targets empty-result outputs op-name id-attr-k schema transform]}
              (build-to-many-resolver-config attribute id-attr-k k->attr)]
     (log/debug "Building Pathom3 resolver" op-name "for" (::attr/qualified-key attribute) "by" id-attr-k)
     (pco/resolver
@@ -350,8 +354,10 @@
               "to-many-resolver"
               (let [pool (get-pool env schema)
                     rows (pg2/pg2-query-prepared! pool sql ids)
-                    results-by-id (index-rows-by-key rows :k #(wrap-targets (:v %)))]
-                (auth/redact env (order-results-by-ids results-by-id ids)))
+                    results-by-id (index-rows-by-key rows :k #(wrap-targets (:v %)))
+                    ;; Return empty-result for IDs with no results (instead of nil)
+                    results (mapv #(get results-by-id % empty-result) ids)]
+                (auth/redact env results))
               {:op-name op-name}))))}
        transform (assoc ::pco/transform transform)))))
 

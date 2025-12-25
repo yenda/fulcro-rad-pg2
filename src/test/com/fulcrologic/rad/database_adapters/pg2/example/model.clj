@@ -304,7 +304,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:api-token/id}})
+   ::attr/identities #{:api-token/id}
+   ::pg2/column-name "user_id"})
 
 (def api-token-attributes
   [api-token-id api-token-name api-token-token-hash api-token-permissions
@@ -356,7 +357,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:notification/id}})
+   ::attr/identities #{:notification/id}
+   ::pg2/column-name "user_id"})
 
 ;; To-one: Optional link to related issue
 (defattr notification-issue :notification/issue :ref
@@ -402,7 +404,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:team-member/id}})
+   ::attr/identities #{:team-member/id}
+   ::pg2/column-name "user_id"})
 
 (def team-member-attributes
   [team-member-id team-member-role team-member-joined-at
@@ -557,7 +560,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:project-member/id}})
+   ::attr/identities #{:project-member/id}
+   ::pg2/column-name "user_id"})
 
 (def project-member-attributes
   [project-member-id project-member-role project-member-joined-at
@@ -964,7 +968,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:issue-watcher/id}})
+   ::attr/identities #{:issue-watcher/id}
+   ::pg2/column-name "user_id"})
 
 (def issue-watcher-attributes
   [issue-watcher-id issue-watcher-subscribed-at issue-watcher-notify-on
@@ -1002,7 +1007,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:issue-assignee/id}})
+   ::attr/identities #{:issue-assignee/id}
+   ::pg2/column-name "user_id"})
 
 (def issue-assignee-attributes
   [issue-assignee-id issue-assignee-assigned-at issue-assignee-primary?
@@ -1110,7 +1116,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:reaction/id}})
+   ::attr/identities #{:reaction/id}
+   ::pg2/column-name "user_id"})
 
 (def reaction-attributes
   [reaction-id reaction-type reaction-created-at reaction-comment reaction-user])
@@ -1223,7 +1230,8 @@
   {::attr/cardinality :one
    ::attr/target :user/id
    ::attr/schema :tracker
-   ::attr/identities #{:time-entry/id}})
+   ::attr/identities #{:time-entry/id}
+   ::pg2/column-name "user_id"})
 
 (def time-entry-attributes
   [time-entry-id time-entry-description time-entry-hours time-entry-logged-at

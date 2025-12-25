@@ -145,6 +145,7 @@
 
    Optimizations applied at compile time:
    - Decoder functions pre-resolved (no case statement at runtime)
+   - Custom sql->form-value transformers pre-resolved
    - Single-key paths use direct assoc instead of assoc-in
 
    Arguments:
@@ -152,15 +153,19 @@
                      {:created_at {:output-path [:message/created-at]
                                    :type :instant}
                       :status     {:output-path [:message/status]
-                                   :type :enum}}"
+                                   :type :enum}
+                      :permissions {:output-path [:token/permissions]
+                                    :type :string
+                                    :sql->form-value json-decode}}"
   [column-config]
   ;; Pre-process: resolve decoders and mark simple paths
-  (let [entries (mapv (fn [[col {:keys [output-path type]}]]
+  (let [entries (mapv (fn [[col {:keys [output-path type sql->form-value]}]]
                         {:col col
                          :output-path output-path
                          :output-key (first output-path)
                          :simple? (= 1 (count output-path))
-                         :decoder (get-decoder type)})
+                         ;; Custom transformer takes precedence over type-based decoder
+                         :decoder (or sql->form-value (get-decoder type))})
                       column-config)]
     (fn transform-row [raw-row]
       (reduce

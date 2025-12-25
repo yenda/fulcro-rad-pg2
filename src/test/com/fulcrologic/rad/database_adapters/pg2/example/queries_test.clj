@@ -18,7 +18,6 @@
    [com.fulcrologic.rad.database-adapters.pg2.read :as read]
    [com.fulcrologic.rad.database-adapters.pg2.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.connect.operation :as pco]
    [com.wsscode.pathom3.interface.eql :as p.eql]
@@ -106,7 +105,7 @@
   (p.eql/process (:env *test-env*) query))
 
 (defn run-query-with-ident [ident query]
-  (p.eql/process (:env *test-env*) ident query))
+  (get (p.eql/process (:env *test-env*) [{ident query}]) ident))
 
 (defn save! [delta]
   (let [{:keys [pool key->attr]} *test-env*
@@ -115,6 +114,14 @@
         env {::rad.pg2/connection-pools {:tracker pool}
              ::attr/key->attribute key->attr}]
     (write/save-form! env params)))
+
+(defn create!
+  "Create a new entity using tempid and return the real ID.
+   delta-fn is called with the tempid to build the delta."
+  [id-key delta-fn]
+  (let [tid (tempid/tempid)
+        result (save! {[id-key tid] (delta-fn tid)})]
+    (get-in result [:tempids tid])))
 
 (defn now [] (Instant/now))
 
@@ -136,55 +143,59 @@
 
 (deftest five-level-deep-query-test
   (testing "Query traversing 5 levels: Organization → Project → Issue → Comment → Reaction"
-    (let [;; Create entities bottom-up
-          user-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
+    (let [;; Create entities using tempids - save-form! treats non-tempids as updates
+          user-tempid (tempid/tempid)
+          org-tempid (tempid/tempid)
+          project-tempid (tempid/tempid)
           issue-tempid (tempid/tempid)
-          comment-id (ids/new-uuid)
-          reaction-id (ids/new-uuid)
+          comment-tempid (tempid/tempid)
+          reaction-tempid (tempid/tempid)
 
           ;; Save user first
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/active? {:after true}}})
+          user-result (save! {[:user/id user-tempid]
+                              {:user/email {:after "test@example.com"}
+                               :user/username {:after "testuser"}
+                               :user/active? {:after true}}})
+          user-id (get-in user-result [:tempids user-tempid])
 
           ;; Save organization
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}
-                     :organization/slug {:after "test-org"}
-                     :organization/public? {:after true}
-                     :organization/created-at {:after (now)}}})
+          org-result (save! {[:organization/id org-tempid]
+                             {:organization/name {:after "Test Org"}
+                              :organization/slug {:after "test-org"}
+                              :organization/public? {:after true}
+                              :organization/created-at {:after (now)}}})
+          org-id (get-in org-result [:tempids org-tempid])
 
           ;; Save project
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/key {:after "TEST"}
-                     :project/organization {:after [:organization/id org-id]}
-                     :project/created-at {:after (now)}}})
+          project-result (save! {[:project/id project-tempid]
+                                 {:project/name {:after "Test Project"}
+                                  :project/key {:after "TEST"}
+                                  :project/organization {:after [:organization/id org-id]}
+                                  :project/created-at {:after (now)}}})
+          project-id (get-in project-result [:tempids project-tempid])
 
           ;; Save issue (uses :long ID, sequence-generated)
-          result (save! {[:issue/id issue-tempid]
-                         {:issue/title {:after "Test Issue"}
-                          :issue/description {:after "Description"}
-                          :issue/status {:after :issue.status/open}
-                          :issue/priority {:after :issue.priority/high}
-                          :issue/type {:after :issue.type/bug}
-                          :issue/project {:after [:project/id project-id]}
-                          :issue/reporter {:after [:user/id user-id]}
-                          :issue/created-at {:after (now)}}})
-          issue-id (get-in result [:tempids issue-tempid])
+          issue-result (save! {[:issue/id issue-tempid]
+                               {:issue/title {:after "Test Issue"}
+                                :issue/description {:after "Description"}
+                                :issue/status {:after :issue.status/open}
+                                :issue/priority {:after :issue.priority/high}
+                                :issue/type {:after :issue.type/bug}
+                                :issue/project {:after [:project/id project-id]}
+                                :issue/reporter {:after [:user/id user-id]}
+                                :issue/created-at {:after (now)}}})
+          issue-id (get-in issue-result [:tempids issue-tempid])
 
           ;; Save comment
-          _ (save! {[:comment/id comment-id]
-                    {:comment/body {:after "This is a comment"}
-                     :comment/issue {:after [:issue/id issue-id]}
-                     :comment/author {:after [:user/id user-id]}
-                     :comment/created-at {:after (now)}}})
+          comment-result (save! {[:comment/id comment-tempid]
+                                 {:comment/body {:after "This is a comment"}
+                                  :comment/issue {:after [:issue/id issue-id]}
+                                  :comment/author {:after [:user/id user-id]}
+                                  :comment/created-at {:after (now)}}})
+          comment-id (get-in comment-result [:tempids comment-tempid])
 
           ;; Save reaction
-          _ (save! {[:reaction/id reaction-id]
+          _ (save! {[:reaction/id reaction-tempid]
                     {:reaction/type {:after :reaction.type/thumbs-up}
                      :reaction/comment {:after [:comment/id comment-id]}
                      :reaction/user {:after [:user/id user-id]}
@@ -233,57 +244,39 @@
 
 (deftest many-to-many-issue-labels-test
   (testing "Issue ↔ Label many-to-many relationship"
-    (let [user-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          label1-id (ids/new-uuid)
-          label2-id (ids/new-uuid)
-          issue-tempid (tempid/tempid)
-          issue-label1-id (ids/new-uuid)
-          issue-label2-id (ids/new-uuid)
-
-          ;; Setup
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/active? {:after true}}})
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/organization {:after [:organization/id org-id]}}})
+    (let [;; Create entities using tempids
+          user-id (create! :user/id (fn [_] {:user/email {:after "test@example.com"}
+                                             :user/username {:after "testuser"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
 
           ;; Create labels
-          _ (save! {[:label/id label1-id]
-                    {:label/name {:after "bug"}
-                     :label/color {:after :color/red}
-                     :label/position {:after 1}
-                     :label/project {:after [:project/id project-id]}}})
-          _ (save! {[:label/id label2-id]
-                    {:label/name {:after "enhancement"}
-                     :label/color {:after :color/blue}
-                     :label/position {:after 2}
-                     :label/project {:after [:project/id project-id]}}})
+          label1-id (create! :label/id (fn [_] {:label/name {:after "bug"}
+                                                :label/color {:after :color/red}
+                                                :label/position {:after 1}
+                                                :label/project {:after [:project/id project-id]}}))
+          label2-id (create! :label/id (fn [_] {:label/name {:after "enhancement"}
+                                                :label/color {:after :color/blue}
+                                                :label/position {:after 2}
+                                                :label/project {:after [:project/id project-id]}}))
 
           ;; Create issue
-          result (save! {[:issue/id issue-tempid]
-                         {:issue/title {:after "Labeled Issue"}
-                          :issue/status {:after :issue.status/open}
-                          :issue/type {:after :issue.type/bug}
-                          :issue/project {:after [:project/id project-id]}
-                          :issue/reporter {:after [:user/id user-id]}
-                          :issue/created-at {:after (now)}}})
-          issue-id (get-in result [:tempids issue-tempid])
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Labeled Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
 
           ;; Create issue-label associations (M:M join records)
-          _ (save! {[:issue-label/id issue-label1-id]
-                    {:issue-label/issue {:after [:issue/id issue-id]}
-                     :issue-label/label {:after [:label/id label1-id]}
-                     :issue-label/added-at {:after (now)}}})
-          _ (save! {[:issue-label/id issue-label2-id]
-                    {:issue-label/issue {:after [:issue/id issue-id]}
-                     :issue-label/label {:after [:label/id label2-id]}
-                     :issue-label/added-at {:after (now)}}})
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                              :issue-label/label {:after [:label/id label1-id]}
+                                              :issue-label/added-at {:after (now)}}))
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                              :issue-label/label {:after [:label/id label2-id]}
+                                              :issue-label/added-at {:after (now)}}))
 
           ;; Query issue with labels through join table
           query-result (run-query-with-ident
@@ -318,50 +311,34 @@
 
 (deftest many-to-many-issue-assignees-test
   (testing "Issue ↔ User assignees many-to-many relationship"
-    (let [user1-id (ids/new-uuid)
-          user2-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          issue-tempid (tempid/tempid)
-          assignee1-id (ids/new-uuid)
-          assignee2-id (ids/new-uuid)
-
-          ;; Setup users
-          _ (save! {[:user/id user1-id]
-                    {:user/email {:after "alice@example.com"}
-                     :user/username {:after "alice"}
-                     :user/active? {:after true}}})
-          _ (save! {[:user/id user2-id]
-                    {:user/email {:after "bob@example.com"}
-                     :user/username {:after "bob"}
-                     :user/active? {:after true}}})
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/organization {:after [:organization/id org-id]}}})
+    (let [;; Create entities using tempids
+          user1-id (create! :user/id (fn [_] {:user/email {:after "alice@example.com"}
+                                              :user/username {:after "alice"}
+                                              :user/active? {:after true}}))
+          user2-id (create! :user/id (fn [_] {:user/email {:after "bob@example.com"}
+                                              :user/username {:after "bob"}
+                                              :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
 
           ;; Create issue
-          result (save! {[:issue/id issue-tempid]
-                         {:issue/title {:after "Multi-Assignee Issue"}
-                          :issue/status {:after :issue.status/open}
-                          :issue/type {:after :issue.type/task}
-                          :issue/project {:after [:project/id project-id]}
-                          :issue/reporter {:after [:user/id user1-id]}
-                          :issue/created-at {:after (now)}}})
-          issue-id (get-in result [:tempids issue-tempid])
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Multi-Assignee Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user1-id]}
+                                               :issue/created-at {:after (now)}}))
 
           ;; Assign both users
-          _ (save! {[:issue-assignee/id assignee1-id]
-                    {:issue-assignee/issue {:after [:issue/id issue-id]}
-                     :issue-assignee/user {:after [:user/id user1-id]}
-                     :issue-assignee/primary? {:after true}
-                     :issue-assignee/assigned-at {:after (now)}}})
-          _ (save! {[:issue-assignee/id assignee2-id]
-                    {:issue-assignee/issue {:after [:issue/id issue-id]}
-                     :issue-assignee/user {:after [:user/id user2-id]}
-                     :issue-assignee/primary? {:after false}
-                     :issue-assignee/assigned-at {:after (now)}}})
+          _ (create! :issue-assignee/id (fn [_] {:issue-assignee/issue {:after [:issue/id issue-id]}
+                                                 :issue-assignee/user {:after [:user/id user1-id]}
+                                                 :issue-assignee/primary? {:after true}
+                                                 :issue-assignee/assigned-at {:after (now)}}))
+          _ (create! :issue-assignee/id (fn [_] {:issue-assignee/issue {:after [:issue/id issue-id]}
+                                                 :issue-assignee/user {:after [:user/id user2-id]}
+                                                 :issue-assignee/primary? {:after false}
+                                                 :issue-assignee/assigned-at {:after (now)}}))
 
           ;; Query
           query-result (run-query-with-ident
@@ -402,56 +379,41 @@
 
 (deftest self-referential-issue-hierarchy-test
   (testing "Issue parent/children self-referential hierarchy"
-    (let [user-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          parent-tempid (tempid/tempid)
-          child1-tempid (tempid/tempid)
-          child2-tempid (tempid/tempid)
-
-          ;; Setup
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/active? {:after true}}})
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/organization {:after [:organization/id org-id]}}})
+    (let [;; Create entities using tempids
+          user-id (create! :user/id (fn [_] {:user/email {:after "test@example.com"}
+                                             :user/username {:after "testuser"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
 
           ;; Create parent issue (epic)
-          parent-result (save! {[:issue/id parent-tempid]
-                                {:issue/title {:after "Epic Issue"}
-                                 :issue/status {:after :issue.status/open}
-                                 :issue/type {:after :issue.type/epic}
-                                 :issue/priority-order {:after 1}
-                                 :issue/project {:after [:project/id project-id]}
-                                 :issue/reporter {:after [:user/id user-id]}
-                                 :issue/created-at {:after (now)}}})
-          parent-id (get-in parent-result [:tempids parent-tempid])
+          parent-id (create! :issue/id (fn [_] {:issue/title {:after "Epic Issue"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/epic}
+                                                :issue/priority-order {:after 1}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
 
           ;; Create child issues
-          child1-result (save! {[:issue/id child1-tempid]
-                                {:issue/title {:after "Child Task 1"}
-                                 :issue/status {:after :issue.status/open}
-                                 :issue/type {:after :issue.type/task}
-                                 :issue/priority-order {:after 1}
-                                 :issue/project {:after [:project/id project-id]}
-                                 :issue/reporter {:after [:user/id user-id]}
-                                 :issue/parent {:after [:issue/id parent-id]}
-                                 :issue/created-at {:after (now)}}})
-          child1-id (get-in child1-result [:tempids child1-tempid])
+          child1-id (create! :issue/id (fn [_] {:issue/title {:after "Child Task 1"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/task}
+                                                :issue/priority-order {:after 1}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/parent {:after [:issue/id parent-id]}
+                                                :issue/created-at {:after (now)}}))
 
-          child2-result (save! {[:issue/id child2-tempid]
-                                {:issue/title {:after "Child Task 2"}
-                                 :issue/status {:after :issue.status/open}
-                                 :issue/type {:after :issue.type/task}
-                                 :issue/priority-order {:after 2}
-                                 :issue/project {:after [:project/id project-id]}
-                                 :issue/reporter {:after [:user/id user-id]}
-                                 :issue/parent {:after [:issue/id parent-id]}
-                                 :issue/created-at {:after (now)}}})
+          _ (create! :issue/id (fn [_] {:issue/title {:after "Child Task 2"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 2}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id parent-id]}
+                                        :issue/created-at {:after (now)}}))
 
           ;; Query parent with children
           parent-query (run-query-with-ident
@@ -500,29 +462,28 @@
 
 (deftest custom-transformer-json-test
   (testing "Custom JSON transformer for API token permissions"
-    (let [user-id (ids/new-uuid)
-          token-id (ids/new-uuid)
-          permissions {:read true :write true :admin false}
+    (let [permissions {:read true :write true :admin false}
+          user-id (create! :user/id (fn [_] {:user/email {:after "test@example.com"}
+                                             :user/username {:after "testuser"}
+                                             :user/active? {:after true}}))
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "CI Token"}
+                                                   :api-token/token-hash {:after "hashed_secret"}
+                                                   :api-token/permissions {:after permissions}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   :api-token/expires-at {:after (now)}}))
 
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/active? {:after true}}})
-
-          _ (save! {[:api-token/id token-id]
-                    {:api-token/name {:after "CI Token"}
-                     :api-token/token-hash {:after "hashed_secret"}
-                     :api-token/permissions {:after permissions}
-                     :api-token/user {:after [:user/id user-id]}
-                     :api-token/expires-at {:after (now)}}})
-
+          ;; Verify write transformer applied by checking DB directly
+          db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT permissions FROM api_tokens WHERE id = ?" token-id])
+          ;; JDBC returns table-qualified keys, get the first (only) value
+          stored-permissions (first (vals db-result))
           query-result (run-query-with-ident
                         [:api-token/id token-id]
-                        [:api-token/name :api-token/permissions])]
+                        [:api-token/name])]
 
       (is (= "CI Token" (:api-token/name query-result)))
-      ;; Permissions should be decoded back to map
-      (is (= permissions (:api-token/permissions query-result))))))
+      ;; Write transformer applied: map stored as string
+      (is (= (pr-str permissions) stored-permissions)))))
 
 ;; =============================================================================
 ;; Test: Custom Value Transformer - CSV Tags
@@ -542,31 +503,28 @@
 
 (deftest custom-transformer-csv-tags-test
   (testing "Custom CSV transformer for webhook events"
-    (let [org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          webhook-id (ids/new-uuid)
-          events [:issue-created :issue-closed :comment-added]
+    (let [events [:issue-created :issue-closed :comment-added]
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          webhook-id (create! :webhook/id (fn [_] {:webhook/name {:after "CI Webhook"}
+                                                   :webhook/url {:after "https://ci.example.com/hook"}
+                                                   :webhook/active? {:after true}
+                                                   :webhook/events {:after events}
+                                                   :webhook/project {:after [:project/id project-id]}}))
 
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/organization {:after [:organization/id org-id]}}})
-
-          _ (save! {[:webhook/id webhook-id]
-                    {:webhook/name {:after "CI Webhook"}
-                     :webhook/url {:after "https://ci.example.com/hook"}
-                     :webhook/active? {:after true}
-                     :webhook/events {:after events}
-                     :webhook/project {:after [:project/id project-id]}}})
-
+          ;; Verify write transformer applied by checking DB directly
+          db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT events FROM webhooks WHERE id = ?" webhook-id])
+          ;; JDBC returns table-qualified keys, get the first (only) value
+          stored-events (first (vals db-result))
           query-result (run-query-with-ident
                         [:webhook/id webhook-id]
-                        [:webhook/name :webhook/events])]
+                        [:webhook/name])]
 
       (is (= "CI Webhook" (:webhook/name query-result)))
-      ;; Events should be decoded back to vector of keywords
-      (is (= events (:webhook/events query-result))))))
+      ;; Write transformer applied: vector stored as CSV string
+      (is (= "issue-created,issue-closed,comment-added" stored-events)))))
 
 ;; =============================================================================
 ;; Test: delete-orphan? - API Tokens
@@ -585,18 +543,12 @@
 
 (deftest delete-orphan-api-tokens-test
   (testing "delete-orphan? removes API tokens when removed from user"
-    (let [user-id (ids/new-uuid)
-          token-id (ids/new-uuid)
-
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/active? {:after true}}})
-
-          _ (save! {[:api-token/id token-id]
-                    {:api-token/name {:after "Test Token"}
-                     :api-token/token-hash {:after "secret"}
-                     :api-token/user {:after [:user/id user-id]}}})
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "test@example.com"}
+                                             :user/username {:after "testuser"}
+                                             :user/active? {:after true}}))
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Test Token"}
+                                                   :api-token/token-hash {:after "secret"}
+                                                   :api-token/user {:after [:user/id user-id]}}))
 
           ;; Verify token exists
           before-query (run-query-with-ident
@@ -609,12 +561,11 @@
                     {:user/api-tokens {:before [[:api-token/id token-id]]
                                        :after []}}})
 
-          ;; Token should be deleted
-          after-query (run-query-with-ident
-                       [:api-token/id token-id]
-                       [:api-token/name])]
+          ;; Token should be deleted - verify via direct database query
+          db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT * FROM api_tokens WHERE id = ?" token-id])]
 
-      (is (nil? (:api-token/name after-query))))))
+      (is (nil? db-result) "API token should be deleted from database"))))
 
 ;; =============================================================================
 ;; Test: delete-orphan? - Comment Reactions
@@ -633,43 +584,26 @@
 
 (deftest delete-orphan-comment-reactions-test
   (testing "delete-orphan? removes reactions when removed from comment"
-    (let [user-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          issue-tempid (tempid/tempid)
-          comment-id (ids/new-uuid)
-          reaction-id (ids/new-uuid)
-
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/active? {:after true}}})
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/organization {:after [:organization/id org-id]}}})
-
-          issue-result (save! {[:issue/id issue-tempid]
-                               {:issue/title {:after "Test Issue"}
-                                :issue/status {:after :issue.status/open}
-                                :issue/type {:after :issue.type/bug}
-                                :issue/project {:after [:project/id project-id]}
-                                :issue/reporter {:after [:user/id user-id]}
-                                :issue/created-at {:after (now)}}})
-          issue-id (get-in issue-result [:tempids issue-tempid])
-
-          _ (save! {[:comment/id comment-id]
-                    {:comment/body {:after "Test comment"}
-                     :comment/issue {:after [:issue/id issue-id]}
-                     :comment/author {:after [:user/id user-id]}
-                     :comment/created-at {:after (now)}}})
-
-          _ (save! {[:reaction/id reaction-id]
-                    {:reaction/type {:after :reaction.type/heart}
-                     :reaction/comment {:after [:comment/id comment-id]}
-                     :reaction/user {:after [:user/id user-id]}
-                     :reaction/created-at {:after (now)}}})
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "test@example.com"}
+                                             :user/username {:after "testuser"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Test Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+          comment-id (create! :comment/id (fn [_] {:comment/body {:after "Test comment"}
+                                                   :comment/issue {:after [:issue/id issue-id]}
+                                                   :comment/author {:after [:user/id user-id]}
+                                                   :comment/created-at {:after (now)}}))
+          reaction-id (create! :reaction/id (fn [_] {:reaction/type {:after :reaction.type/heart}
+                                                     :reaction/comment {:after [:comment/id comment-id]}
+                                                     :reaction/user {:after [:user/id user-id]}
+                                                     :reaction/created-at {:after (now)}}))
 
           ;; Verify reaction exists
           before-query (run-query-with-ident
@@ -682,12 +616,11 @@
                     {:comment/reactions {:before [[:reaction/id reaction-id]]
                                          :after []}}})
 
-          ;; Reaction should be deleted
-          after-query (run-query-with-ident
-                       [:reaction/id reaction-id]
-                       [:reaction/type])]
+          ;; Reaction should be deleted - verify via direct database query
+          db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT * FROM reactions WHERE id = ?" reaction-id])]
 
-      (is (nil? (:reaction/type after-query))))))
+      (is (nil? db-result) "Reaction should be deleted from database"))))
 
 ;; =============================================================================
 ;; Test: All Attribute Types Round-Trip
@@ -716,49 +649,36 @@
 
 (deftest all-attribute-types-test
   (testing "All attribute types round-trip correctly"
-    (let [user-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          issue-tempid (tempid/tempid)
-          now-instant (now)
+    (let [now-instant (now)
           test-estimate 42.5M
-
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "test@example.com"}
-                     :user/username {:after "testuser"}
-                     :user/display-name {:after "Test User"}
-                     :user/password-hash {:after "bcrypt_hash_here"}
-                     :user/active? {:after true}
-                     :user/admin? {:after false}
-                     :user/created-at {:after now-instant}
-                     :user/last-login-at {:after now-instant}}})
-
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/key {:after "TEST"}
-                     :project/default-workflow {:after 'workflow/standard}
-                     :project/budget {:after 10000.00M}
-                     :project/organization {:after [:organization/id org-id]}}})
-
-          result (save! {[:issue/id issue-tempid]
-                         {:issue/title {:after "Type Test Issue"}
-                          :issue/description {:after "Testing all types"}
-                          :issue/status {:after :issue.status/in-progress}
-                          :issue/priority {:after :issue.priority/critical}
-                          :issue/type {:after :issue.type/feature}
-                          :issue/workflow-state {:after 'state/active}
-                          :issue/priority-order {:after 42}
-                          :issue/estimate {:after test-estimate}
-                          :issue/time-spent {:after 10.25M}
-                          :issue/vote-count {:after 100}
-                          :issue/created-at {:after now-instant}
-                          :issue/due-date {:after now-instant}
-                          :issue/project {:after [:project/id project-id]}
-                          :issue/reporter {:after [:user/id user-id]}}})
-          issue-id (get-in result [:tempids issue-tempid])
+          user-id (create! :user/id (fn [_] {:user/email {:after "test@example.com"}
+                                             :user/username {:after "testuser"}
+                                             :user/display-name {:after "Test User"}
+                                             :user/password-hash {:after "bcrypt_hash_here"}
+                                             :user/active? {:after true}
+                                             :user/admin? {:after false}
+                                             :user/created-at {:after now-instant}
+                                             :user/last-login-at {:after now-instant}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/key {:after "TEST"}
+                                                   :project/default-workflow {:after 'workflow/standard}
+                                                   :project/budget {:after 10000.00M}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Type Test Issue"}
+                                               :issue/description {:after "Testing all types"}
+                                               :issue/status {:after :issue.status/in-progress}
+                                               :issue/priority {:after :issue.priority/critical}
+                                               :issue/type {:after :issue.type/feature}
+                                               :issue/workflow-state {:after 'state/active}
+                                               :issue/priority-order {:after 42}
+                                               :issue/estimate {:after test-estimate}
+                                               :issue/time-spent {:after 10.25M}
+                                               :issue/vote-count {:after 100}
+                                               :issue/created-at {:after now-instant}
+                                               :issue/due-date {:after now-instant}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}}))
 
           ;; Query all fields
           query-result (run-query-with-ident
@@ -821,31 +741,20 @@
 
 (deftest order-by-labels-test
   (testing "Labels are ordered by position"
-    (let [org-id (ids/new-uuid)
-          project-id (ids/new-uuid)
-          label1-id (ids/new-uuid)
-          label2-id (ids/new-uuid)
-          label3-id (ids/new-uuid)
-
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Test Org"}}})
-          _ (save! {[:project/id project-id]
-                    {:project/name {:after "Test Project"}
-                     :project/organization {:after [:organization/id org-id]}}})
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
 
           ;; Create labels out of order
-          _ (save! {[:label/id label2-id]
-                    {:label/name {:after "Beta"}
-                     :label/position {:after 2}
-                     :label/project {:after [:project/id project-id]}}})
-          _ (save! {[:label/id label3-id]
-                    {:label/name {:after "Gamma"}
-                     :label/position {:after 3}
-                     :label/project {:after [:project/id project-id]}}})
-          _ (save! {[:label/id label1-id]
-                    {:label/name {:after "Alpha"}
-                     :label/position {:after 1}
-                     :label/project {:after [:project/id project-id]}}})
+          _ (create! :label/id (fn [_] {:label/name {:after "Beta"}
+                                        :label/position {:after 2}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Gamma"}
+                                        :label/position {:after 3}
+                                        :label/project {:after [:project/id project-id]}}))
+          _ (create! :label/id (fn [_] {:label/name {:after "Alpha"}
+                                        :label/position {:after 1}
+                                        :label/project {:after [:project/id project-id]}}))
 
           ;; Query labels - should be ordered by position
           query-result (run-query-with-ident
@@ -876,42 +785,31 @@
 
 (deftest alternative-five-level-path-test
   (testing "Query: Organization → Team → TeamMember → User → Notification"
-    (let [user-id (ids/new-uuid)
-          org-id (ids/new-uuid)
-          team-id (ids/new-uuid)
-          team-member-id (ids/new-uuid)
-          notification-id (ids/new-uuid)
-
-          ;; Create user
-          _ (save! {[:user/id user-id]
-                    {:user/email {:after "team@example.com"}
-                     :user/username {:after "teamuser"}
-                     :user/active? {:after true}}})
+    (let [;; Create user
+          user-id (create! :user/id (fn [_] {:user/email {:after "team@example.com"}
+                                             :user/username {:after "teamuser"}
+                                             :user/active? {:after true}}))
 
           ;; Create notification for user
-          _ (save! {[:notification/id notification-id]
-                    {:notification/title {:after "You were added to a team"}
-                     :notification/type {:after :notification.type/project-invited}
-                     :notification/read? {:after false}
-                     :notification/user {:after [:user/id user-id]}
-                     :notification/created-at {:after (now)}}})
+          _ (create! :notification/id (fn [_] {:notification/title {:after "You were added to a team"}
+                                               :notification/type {:after :notification.type/project-invited}
+                                               :notification/read? {:after false}
+                                               :notification/user {:after [:user/id user-id]}
+                                               :notification/created-at {:after (now)}}))
 
           ;; Create organization
-          _ (save! {[:organization/id org-id]
-                    {:organization/name {:after "Team Org"}
-                     :organization/created-at {:after (now)}}})
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Team Org"}
+                                                    :organization/created-at {:after (now)}}))
 
           ;; Create team
-          _ (save! {[:team/id team-id]
-                    {:team/name {:after "Engineering"}
-                     :team/organization {:after [:organization/id org-id]}}})
+          team-id (create! :team/id (fn [_] {:team/name {:after "Engineering"}
+                                             :team/organization {:after [:organization/id org-id]}}))
 
           ;; Add user to team via TeamMember
-          _ (save! {[:team-member/id team-member-id]
-                    {:team-member/role {:after :team.role/member}
-                     :team-member/team {:after [:team/id team-id]}
-                     :team-member/user {:after [:user/id user-id]}
-                     :team-member/joined-at {:after (now)}}})
+          _ (create! :team-member/id (fn [_] {:team-member/role {:after :team.role/member}
+                                              :team-member/team {:after [:team/id team-id]}
+                                              :team-member/user {:after [:user/id user-id]}
+                                              :team-member/joined-at {:after (now)}}))
 
           ;; Query 5 levels
           query-result (run-query-with-ident
@@ -937,3 +835,64 @@
       (is (= "You were added to a team"
              (-> query-result :organization/teams first :team/members first
                  :team-member/user :user/notifications first :notification/title))))))
+
+;; =============================================================================
+;; Custom Transformer Round-Trip Test
+;;
+;; Verifies that sql->form-value is applied on reads, enabling full round-trip
+;; transformation of custom data types (JSON, CSV, etc.)
+;; =============================================================================
+
+(deftest sql->form-value-applied-on-reads-test
+  (testing "sql->form-value transformer is applied on reads"
+    (let [permissions {:read true :write true :admin false}
+          user-id (create! :user/id (fn [_] {:user/email {:after "bug-test@example.com"}
+                                             :user/username {:after "bugtest"}
+                                             :user/active? {:after true}}))
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Bug Test Token"}
+                                                   :api-token/token-hash {:after "hash"}
+                                                   :api-token/permissions {:after permissions}
+                                                   :api-token/user {:after [:user/id user-id]}}))
+
+          ;; Query via Pathom - sql->form-value should be applied
+          result (run-query-with-ident
+                  [:api-token/id token-id]
+                  [:api-token/name :api-token/permissions])]
+
+      (is (= "Bug Test Token" (:api-token/name result)))
+      ;; Verify the custom transformer decoded the string back to a map
+      (is (map? (:api-token/permissions result))
+          "sql->form-value should decode the JSON string back to a map")
+      (is (= permissions (:api-token/permissions result))
+          "Decoded permissions should match original"))))
+
+;; =============================================================================
+;; Empty To-Many Relationship Test
+;;
+;; Verifies that to-many relationships with no results return an empty vector
+;; instead of throwing an error.
+;; =============================================================================
+
+(deftest empty-to-many-returns-empty-vector-test
+  (testing "Empty to-many relationship returns empty vector"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "empty-test@example.com"}
+                                             :user/username {:after "emptytest"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Empty Test Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Empty Test Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Empty Comments Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Query issue with comments - issue has no comments
+          result (run-query-with-ident
+                  [:issue/id issue-id]
+                  [:issue/title {:issue/comments [:comment/body]}])]
+
+      (is (= "Empty Comments Issue" (:issue/title result)))
+      (is (= [] (:issue/comments result))
+          "Empty to-many should return empty vector"))))
