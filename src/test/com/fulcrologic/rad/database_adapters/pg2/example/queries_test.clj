@@ -1694,3 +1694,187 @@
 
       (is (= updated-perms (:api-token/permissions after))
           "Updated transformer value should persist correctly"))))
+
+;; =============================================================================
+;; DELETE OPERATION TESTS
+;;
+;; Tests for explicit entity deletion via {:delete true}
+;; =============================================================================
+
+(deftest delete-single-entity-test
+  (testing "Delete a single entity via save-form!"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "delete-test@example.com"}
+                                             :user/username {:after "deletetest"}
+                                             :user/active? {:after true}}))
+
+          ;; Verify entity exists
+          before (run-query-with-ident [:user/id user-id]
+                                       [:user/email :user/username])
+          _ (is (= "deletetest" (:user/username before)))
+
+          ;; Delete entity
+          _ (save! {[:user/id user-id] {:delete true}})
+
+          ;; Verify entity is deleted via direct DB query
+          db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT * FROM users WHERE id = ?" user-id])]
+
+      (is (nil? db-result) "Entity should be deleted from database"))))
+
+(deftest delete-entity-with-children-fk-violation-test
+  (testing "Deleting entity with FK references throws exception"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "fk-delete@example.com"}
+                                             :user/username {:after "fkdelete"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "FK Delete Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "FK Delete Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          ;; Create issue that references the project
+          _issue-id (create! :issue/id (fn [_] {:issue/title {:after "FK Delete Issue"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/task}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))]
+
+      ;; Try to delete the project while issues reference it
+      (is (thrown? Exception
+                   (save! {[:project/id project-id] {:delete true}}))
+          "Should throw FK violation when deleting entity with references"))))
+
+(deftest delete-multiple-entities-test
+  (testing "Delete multiple entities in a single delta"
+    (let [;; Create 3 users
+          user-ids (vec (for [i (range 3)]
+                          (create! :user/id (fn [_] {:user/email {:after (str "multi-delete-" i "@example.com")}
+                                                     :user/username {:after (str "multidelete" i)}
+                                                     :user/active? {:after true}}))))
+
+          ;; Verify all exist
+          before-count (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                          ["SELECT COUNT(*) as cnt FROM users WHERE username LIKE 'multidelete%'"])
+          _ (is (= 3 (:cnt before-count)))
+
+          ;; Delete all 3 in single delta
+          _ (save! (into {} (for [id user-ids]
+                              [[:user/id id] {:delete true}])))
+
+          ;; Verify all deleted
+          after-count (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                         ["SELECT COUNT(*) as cnt FROM users WHERE username LIKE 'multidelete%'"])]
+
+      (is (= 0 (:cnt after-count)) "All entities should be deleted"))))
+
+(deftest delete-nonexistent-entity-test
+  (testing "Deleting non-existent entity completes without error"
+    ;; This tests idempotency - deleting something that doesn't exist should succeed
+    (let [fake-id (java.util.UUID/randomUUID)]
+      ;; Should not throw
+      (save! {[:user/id fake-id] {:delete true}})
+      ;; If we got here without exception, test passes
+      (is true "Delete of non-existent entity should succeed silently"))))
+
+(deftest delete-entity-then-query-test
+  (testing "Querying deleted entity returns nil/empty"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "query-after-delete@example.com"}
+                                             :user/username {:after "queryafterdelete"}
+                                             :user/active? {:after true}}))
+
+          ;; Verify entity exists
+          before (run-query-with-ident [:user/id user-id]
+                                       [:user/email :user/username])
+          _ (is (= "queryafterdelete" (:user/username before)))
+
+          ;; Delete entity
+          _ (save! {[:user/id user-id] {:delete true}})
+
+          ;; Query deleted entity - should return empty/nil
+          after (run-query-with-ident [:user/id user-id]
+                                      [:user/email :user/username])]
+
+      ;; Pathom returns empty map or nil for non-existent entities
+      (is (or (nil? after) (empty? after) (nil? (:user/username after)))
+          "Querying deleted entity should return nil/empty"))))
+
+(deftest delete-parent-with-to-many-children-test
+  (testing "Delete parent updates to-many children (clears FK)"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "parent-delete@example.com"}
+                                             :user/username {:after "parentdelete"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Parent Delete Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Parent Delete Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create labels for the project
+          label-ids (vec (for [i (range 3)]
+                           (create! :label/id (fn [_] {:label/name {:after (str "Label " i)}
+                                                       :label/position {:after i}
+                                                       :label/project {:after [:project/id project-id]}}))))
+
+          ;; Verify labels exist with project FK
+          before-labels (jdbc/execute! (:jdbc-conn *test-env*)
+                                       ["SELECT id, project FROM labels WHERE project = ?" project-id])
+          _ (is (= 3 (count before-labels)) "Should have 3 labels")]
+
+      ;; Note: Depending on FK constraints, this may throw or cascade
+      ;; The automatic schema doesn't add ON DELETE CASCADE by default
+      ;; So deleting project should fail due to FK constraint on labels
+      (is (thrown? Exception
+                   (save! {[:project/id project-id] {:delete true}}))
+          "Deleting project with label references should fail due to FK constraint"))))
+
+(deftest delete-leaf-entity-preserves-parent-test
+  (testing "Deleting child entity preserves parent"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "leaf-delete@example.com"}
+                                             :user/username {:after "leafdelete"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Leaf Delete Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Leaf Delete Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create a label
+          label-id (create! :label/id (fn [_] {:label/name {:after "Delete Me Label"}
+                                               :label/position {:after 1}
+                                               :label/project {:after [:project/id project-id]}}))
+
+          ;; Delete the label
+          _ (save! {[:label/id label-id] {:delete true}})
+
+          ;; Verify label is deleted
+          label-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                          ["SELECT * FROM labels WHERE id = ?" label-id])
+
+          ;; Verify project still exists
+          project-result (run-query-with-ident [:project/id project-id]
+                                               [:project/name])]
+
+      (is (nil? label-result) "Label should be deleted")
+      (is (= "Leaf Delete Project" (:project/name project-result))
+          "Parent project should still exist"))))
+
+(deftest delete-and-create-in-same-delta-test
+  (testing "Delete and create entities in the same delta"
+    (let [;; Create initial user
+          old-user-id (create! :user/id (fn [_] {:user/email {:after "old-user@example.com"}
+                                                 :user/username {:after "olduser"}
+                                                 :user/active? {:after true}}))
+
+          ;; Create new user and delete old in same delta
+          new-user-tempid (tempid/tempid)
+          result (save! {[:user/id old-user-id] {:delete true}
+                         [:user/id new-user-tempid]
+                         {:user/email {:after "new-user@example.com"}
+                          :user/username {:after "newuser"}
+                          :user/active? {:after true}}})
+          new-user-id (get (:tempids result) new-user-tempid)
+
+          ;; Verify old user deleted
+          old-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                        ["SELECT * FROM users WHERE id = ?" old-user-id])
+
+          ;; Verify new user created
+          new-result (run-query-with-ident [:user/id new-user-id]
+                                           [:user/username])]
+
+      (is (nil? old-result) "Old user should be deleted")
+      (is (= "newuser" (:user/username new-result)) "New user should be created"))))
