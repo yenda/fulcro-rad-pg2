@@ -2224,3 +2224,367 @@
 
     ;; Children should be independently associated with correct parent
     ))
+
+;; =============================================================================
+;; MANY-TO-MANY RELATIONSHIP TESTS
+;;
+;; Tests for Issue ↔ Label through IssueLabel join table
+;; =============================================================================
+
+(deftest m2m-query-labels-for-issue-test
+  (testing "Query labels for an issue via join table"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m@example.com"}
+                                             :user/username {:after "m2mtest"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create labels
+          label-bug-id (create! :label/id (fn [_] {:label/name {:after "bug"}
+                                                   :label/color {:after :color/red}
+                                                   :label/position {:after 1}
+                                                   :label/project {:after [:project/id project-id]}}))
+          label-urgent-id (create! :label/id (fn [_] {:label/name {:after "urgent"}
+                                                      :label/color {:after :color/orange}
+                                                      :label/position {:after 2}
+                                                      :label/project {:after [:project/id project-id]}}))
+
+          ;; Create issue
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Labeled Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Create issue-label associations
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                              :issue-label/label {:after [:label/id label-bug-id]}
+                                              :issue-label/added-at {:after (now)}}))
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                              :issue-label/label {:after [:label/id label-urgent-id]}
+                                              :issue-label/added-at {:after (now)}}))
+
+          ;; Query issue with labels
+          result (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title
+                                        {:issue/labels
+                                         [:issue-label/id
+                                          {:issue-label/label [:label/id :label/name :label/color]}]}])
+
+          labels (->> (:issue/labels result)
+                      (map #(get-in % [:issue-label/label :label/name]))
+                      sort)]
+
+      (is (= "Labeled Issue" (:issue/title result)))
+      (is (= 2 (count (:issue/labels result))))
+      (is (= ["bug" "urgent"] labels)))))
+
+(deftest m2m-query-issues-for-label-test
+  (testing "Query issues that have a specific label"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-reverse@example.com"}
+                                             :user/username {:after "m2mreverse"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Reverse Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Reverse Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create a shared label
+          label-id (create! :label/id (fn [_] {:label/name {:after "shared-label"}
+                                               :label/color {:after :color/blue}
+                                               :label/position {:after 1}
+                                               :label/project {:after [:project/id project-id]}}))
+
+          ;; Create 3 issues
+          issue1-id (create! :issue/id (fn [_] {:issue/title {:after "Issue 1"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/task}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
+          issue2-id (create! :issue/id (fn [_] {:issue/title {:after "Issue 2"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/task}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
+          _issue3-id (create! :issue/id (fn [_] {:issue/title {:after "Issue 3 (no label)"}
+                                                 :issue/status {:after :issue.status/open}
+                                                 :issue/type {:after :issue.type/task}
+                                                 :issue/project {:after [:project/id project-id]}
+                                                 :issue/reporter {:after [:user/id user-id]}
+                                                 :issue/created-at {:after (now)}}))
+
+          ;; Associate label with issues 1 and 2 (not 3)
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue1-id]}
+                                              :issue-label/label {:after [:label/id label-id]}
+                                              :issue-label/added-at {:after (now)}}))
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue2-id]}
+                                              :issue-label/label {:after [:label/id label-id]}
+                                              :issue-label/added-at {:after (now)}}))
+
+          ;; Query via direct SQL to find issues with this label
+          ;; (Note: There's no direct :label/issues resolver, so we query the join table)
+          db-result (jdbc/execute! (:jdbc-conn *test-env*)
+                                   ["SELECT il.issue FROM issue_labels il WHERE il.label = ?" label-id])
+          ;; JDBC returns snake_case keys by default
+          issue-ids-from-db (set (map #(or (:issue %) (:issue_labels/issue %)) db-result))]
+
+      (is (= 2 (count db-result)) "Label should be on 2 issues")
+      (is (= #{issue1-id issue2-id} issue-ids-from-db)))))
+
+(deftest m2m-add-label-to-issue-test
+  (testing "Add a label to an existing issue"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-add@example.com"}
+                                             :user/username {:after "m2madd"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Add Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Add Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create label
+          label-id (create! :label/id (fn [_] {:label/name {:after "new-label"}
+                                               :label/color {:after :color/green}
+                                               :label/position {:after 1}
+                                               :label/project {:after [:project/id project-id]}}))
+
+          ;; Create issue without labels
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Issue without labels"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Verify no labels initially
+          before (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title {:issue/labels [:issue-label/id]}])
+          _ (is (= [] (:issue/labels before)) "Should have no labels initially")
+
+          ;; Add label via creating IssueLabel
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                              :issue-label/label {:after [:label/id label-id]}
+                                              :issue-label/added-at {:after (now)}}))
+
+          ;; Verify label is now present
+          after (run-query-with-ident [:issue/id issue-id]
+                                      [:issue/title
+                                       {:issue/labels
+                                        [{:issue-label/label [:label/name]}]}])]
+
+      (is (= 1 (count (:issue/labels after))))
+      (is (= "new-label" (-> after :issue/labels first :issue-label/label :label/name))))))
+
+(deftest m2m-remove-label-from-issue-test
+  (testing "Remove a label from an issue by deleting the join entity"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-remove@example.com"}
+                                             :user/username {:after "m2mremove"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Remove Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Remove Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create 2 labels
+          label1-id (create! :label/id (fn [_] {:label/name {:after "keep-label"}
+                                                :label/position {:after 1}
+                                                :label/project {:after [:project/id project-id]}}))
+          label2-id (create! :label/id (fn [_] {:label/name {:after "remove-label"}
+                                                :label/position {:after 2}
+                                                :label/project {:after [:project/id project-id]}}))
+
+          ;; Create issue
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Issue to unlabel"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Create both associations
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                              :issue-label/label {:after [:label/id label1-id]}
+                                              :issue-label/added-at {:after (now)}}))
+          issue-label2-id (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                                            :issue-label/label {:after [:label/id label2-id]}
+                                                            :issue-label/added-at {:after (now)}}))
+
+          ;; Verify 2 labels
+          before (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title {:issue/labels [:issue-label/id]}])
+          _ (is (= 2 (count (:issue/labels before))))
+
+          ;; Remove label2 by deleting the IssueLabel
+          _ (save! {[:issue-label/id issue-label2-id] {:delete true}})
+
+          ;; Verify only 1 label remains
+          after (run-query-with-ident [:issue/id issue-id]
+                                      [:issue/title
+                                       {:issue/labels
+                                        [{:issue-label/label [:label/name]}]}])
+          remaining-labels (mapv #(-> % :issue-label/label :label/name) (:issue/labels after))]
+
+      (is (= 1 (count (:issue/labels after))))
+      (is (= ["keep-label"] remaining-labels)))))
+
+(deftest m2m-issue-with-no-labels-test
+  (testing "Issue without labels returns empty vector"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-empty@example.com"}
+                                             :user/username {:after "m2mempty"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Empty Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Empty Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create issue without labels
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Unlabeled Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Query labels
+          result (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title {:issue/labels [:issue-label/id]}])]
+
+      (is (= "Unlabeled Issue" (:issue/title result)))
+      (is (= [] (:issue/labels result))))))
+
+(deftest m2m-multiple-issues-same-label-test
+  (testing "Multiple issues can share the same label"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-shared@example.com"}
+                                             :user/username {:after "m2mshared"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Shared Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Shared Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create one label
+          label-id (create! :label/id (fn [_] {:label/name {:after "common-label"}
+                                               :label/position {:after 1}
+                                               :label/project {:after [:project/id project-id]}}))
+
+          ;; Create 3 issues
+          issue-ids (vec (for [i (range 3)]
+                           (create! :issue/id (fn [_] {:issue/title {:after (str "Shared Issue " i)}
+                                                       :issue/status {:after :issue.status/open}
+                                                       :issue/type {:after :issue.type/task}
+                                                       :issue/project {:after [:project/id project-id]}
+                                                       :issue/reporter {:after [:user/id user-id]}
+                                                       :issue/created-at {:after (now)}}))))
+
+          ;; Associate all 3 issues with the same label
+          _ (doseq [issue-id issue-ids]
+              (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                                :issue-label/label {:after [:label/id label-id]}
+                                                :issue-label/added-at {:after (now)}})))
+
+          ;; Verify each issue has the label
+          results (for [issue-id issue-ids]
+                    (run-query-with-ident [:issue/id issue-id]
+                                          [:issue/title
+                                           {:issue/labels
+                                            [{:issue-label/label [:label/name]}]}]))]
+
+      (doseq [result results]
+        (is (= 1 (count (:issue/labels result))))
+        (is (= "common-label" (-> result :issue/labels first :issue-label/label :label/name)))))))
+
+(deftest m2m-one-issue-multiple-labels-test
+  (testing "One issue can have multiple labels"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-multi@example.com"}
+                                             :user/username {:after "m2mmulti"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Multi Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Multi Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create 5 labels
+          label-names ["bug" "urgent" "frontend" "backend" "documentation"]
+          label-ids (vec (for [[i name] (map-indexed vector label-names)]
+                           (create! :label/id (fn [_] {:label/name {:after name}
+                                                       :label/position {:after i}
+                                                       :label/project {:after [:project/id project-id]}}))))
+
+          ;; Create issue
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Multi-labeled Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Associate all 5 labels
+          _ (doseq [label-id label-ids]
+              (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue-id]}
+                                                :issue-label/label {:after [:label/id label-id]}
+                                                :issue-label/added-at {:after (now)}})))
+
+          ;; Query issue with all labels
+          result (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title
+                                        {:issue/labels
+                                         [{:issue-label/label [:label/name]}]}])
+          result-labels (->> (:issue/labels result)
+                             (map #(-> % :issue-label/label :label/name))
+                             sort)]
+
+      (is (= 5 (count (:issue/labels result))))
+      (is (= ["backend" "bug" "documentation" "frontend" "urgent"] result-labels)))))
+
+(deftest m2m-batch-query-issues-with-labels-test
+  (testing "Batch query multiple issues with their labels"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "m2m-batch@example.com"}
+                                             :user/username {:after "m2mbatch"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "M2M Batch Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "M2M Batch Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create labels
+          label-a-id (create! :label/id (fn [_] {:label/name {:after "label-a"}
+                                                 :label/position {:after 1}
+                                                 :label/project {:after [:project/id project-id]}}))
+          label-b-id (create! :label/id (fn [_] {:label/name {:after "label-b"}
+                                                 :label/position {:after 2}
+                                                 :label/project {:after [:project/id project-id]}}))
+
+          ;; Create 2 issues with different labels
+          issue1-id (create! :issue/id (fn [_] {:issue/title {:after "Issue with A"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/task}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
+          issue2-id (create! :issue/id (fn [_] {:issue/title {:after "Issue with B"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/task}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
+
+          ;; Issue 1 gets label A, Issue 2 gets label B
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue1-id]}
+                                              :issue-label/label {:after [:label/id label-a-id]}
+                                              :issue-label/added-at {:after (now)}}))
+          _ (create! :issue-label/id (fn [_] {:issue-label/issue {:after [:issue/id issue2-id]}
+                                              :issue-label/label {:after [:label/id label-b-id]}
+                                              :issue-label/added-at {:after (now)}}))
+
+          ;; Batch query both issues
+          results (run-query [{[:issue/id issue1-id] [:issue/title
+                                                      {:issue/labels
+                                                       [{:issue-label/label [:label/name]}]}]}
+                              {[:issue/id issue2-id] [:issue/title
+                                                      {:issue/labels
+                                                       [{:issue-label/label [:label/name]}]}]}])
+
+          issue1-result (get results [:issue/id issue1-id])
+          issue2-result (get results [:issue/id issue2-id])]
+
+      (is (= "Issue with A" (:issue/title issue1-result)))
+      (is (= "label-a" (-> issue1-result :issue/labels first :issue-label/label :label/name)))
+
+      (is (= "Issue with B" (:issue/title issue2-result)))
+      (is (= "label-b" (-> issue2-result :issue/labels first :issue-label/label :label/name))))))
