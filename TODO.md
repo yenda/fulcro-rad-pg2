@@ -44,67 +44,35 @@ To-many relationships with no results now correctly return `{:attr-key []}` inst
 
 ---
 
-### 4. Null/nil handling
+### 4. ~~Null/nil handling~~ DONE
 
-**Priority:** Medium
-
-No tests for setting attributes to `nil`:
-- Optional attributes set to nil
-- Clearing a ref (setting to-one ref to nil)
-- Behavior with required vs optional fields
-
-**Test cases needed:**
-```clojure
-(deftest set-optional-to-nil-test
-  ;; Set issue/description to nil
-  )
-
-(deftest clear-to-one-ref-test
-  ;; Set issue/milestone to nil
-  )
-```
+**Status:** DONE
+**Bug fixed:** `compile-pg2-row-transformer` now uses `contains?` instead of `if-some` to include NULL values in output maps.
+**Tests added:**
+- `set-optional-string-to-nil-test` - Set display-name to nil
+- `set-optional-instant-to-nil-test` - Set last-login-at to nil
+- `set-optional-decimal-to-nil-test` - Set budget to nil
+- `clear-optional-to-one-ref-test` - Clear issue/milestone ref
 
 ---
 
-### 5. Batch resolver behavior
+### 5. ~~Batch resolver behavior~~ DONE
 
-**Priority:** Medium
-
-Resolvers are configured with `batch? true` but no tests verify batching works correctly:
-- Multiple entities resolved in single query
-- Performance characteristics
-- Correct data association
-
-**Test cases needed:**
-```clojure
-(deftest batch-resolution-test
-  ;; Query 50 issues, verify single SQL query executed
-  ;; Verify each issue gets correct data
-  )
-```
+**Status:** DONE
+**Tests added:**
+- `batch-resolution-multiple-entities-test` - Query 10 entities in single batch, verify correct data
+- `batch-resolution-with-joins-test` - Batch query with to-one joins
+- `batch-to-many-resolution-test` - To-many with varying child counts (2, 3, 0)
 
 ---
 
-### 6. Error scenarios
+### 6. ~~Error scenarios~~ DONE
 
-**Priority:** Medium
-
-No tests for database constraint violations:
-- Foreign key violations (referencing non-existent entity)
-- Unique constraint violations (duplicate email)
-- Not-null constraint violations
-- Data type mismatches
-
-**Test cases needed:**
-```clojure
-(deftest fk-violation-test
-  ;; Try to create issue with non-existent project
-  )
-
-(deftest unique-violation-test
-  ;; Try to create two users with same email
-  )
-```
+**Status:** DONE
+**Tests added:**
+- `fk-violation-throws-exception-test` - FK violation throws exception
+- `duplicate-allowed-without-unique-constraint-test` - Documents that schema generator doesn't create UNIQUE constraints (Fulcro RAD `::attr/required?` is form-level only)
+- `null-allowed-without-not-null-constraint-test` - Documents that schema generator doesn't create NOT NULL constraints
 
 ---
 
