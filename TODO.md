@@ -90,25 +90,26 @@ To-many relationships with no results now correctly return `{:attr-key []}` inst
 
 ---
 
-### 8. Transformer edge cases
+### 8. ~~Transformer edge cases~~ DONE
 
-**Priority:** Low
+**Status:** DONE
+**Tests added:**
 
-Custom transformer functions may receive edge case inputs:
-- `nil` values
-- Empty strings
-- Empty collections
+CSV transformer (tags->csv / csv->tags):
+- `transformer-csv-nil-value-test` - nil value handling
+- `transformer-csv-empty-vector-test` - empty vector -> nil
+- `transformer-csv-single-tag-test` - single tag round-trip
+- `transformer-csv-multiple-tags-test` - multiple tags preserve order
 
-**Test cases needed:**
-```clojure
-(deftest transformer-nil-handling-test
-  ;; Verify transformers handle nil gracefully
-  )
+JSON transformer (json-encode / json-decode):
+- `transformer-json-nil-value-test` - nil value handling
+- `transformer-json-empty-map-test` - empty map {} round-trip
+- `transformer-json-simple-map-test` - simple map round-trip
+- `transformer-json-nested-structure-test` - nested structures
+- `transformer-json-vector-value-test` - vector values
 
-(deftest transformer-empty-collection-test
-  ;; Verify CSV transformer handles empty vector
-  )
-```
+Update operations:
+- `transformer-update-value-test` - updating transformed values
 
 ---
 
