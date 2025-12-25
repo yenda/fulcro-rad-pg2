@@ -76,21 +76,17 @@ To-many relationships with no results now correctly return `{:attr-key []}` inst
 
 ---
 
-### 7. `order-by` edge cases
+### 7. ~~`order-by` edge cases~~ DONE
 
-**Priority:** Low
-
-Basic ordering is tested, but edge cases are not:
-- Null values in ordered column
-- Duplicate values (stability)
-- Descending order (if supported)
-
-**Test cases needed:**
-```clojure
-(deftest order-by-with-nulls-test
-  ;; Labels with nil position should come last
-  )
-```
+**Status:** DONE
+**Tests added:**
+- `order-by-with-null-values-test` - NULL values sorted last (PostgreSQL default)
+- `order-by-duplicate-values-test` - Duplicate positions maintain grouping
+- `order-by-with-large-dataset-test` - 20 items sorted correctly
+- `order-by-empty-collection-test` - Empty result returns `[]`
+- `order-by-single-item-test` - Single item works
+- `order-by-negative-positions-test` - Negative/zero/positive sorting
+- `order-by-batch-multiple-parents-test` - Batch query with independent ordering per parent
 
 ---
 
