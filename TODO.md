@@ -115,15 +115,20 @@ Update operations:
 
 ## Additional Test Coverage
 
-### 9. Delete operations
+### 9. ~~Delete operations~~ DONE
 
-**Priority:** Medium
+**Status:** DONE
+**Tests added:**
+- `delete-single-entity-test` - Basic entity deletion
+- `delete-entity-with-children-fk-violation-test` - FK constraint enforcement
+- `delete-multiple-entities-test` - Batch deletion in single delta
+- `delete-nonexistent-entity-test` - Idempotent delete behavior
+- `delete-entity-then-query-test` - Verification after deletion
+- `delete-parent-with-to-many-children-test` - FK constraint on parent
+- `delete-leaf-entity-preserves-parent-test` - Child deletion preserves parent
+- `delete-and-create-in-same-delta-test` - Mixed create/delete operations
 
-No tests verify delete functionality:
-- Delete single entity
-- Delete with cascade (owned components)
-- Delete with `::pg2/delete-orphan?` behavior
-- Verify refs are cleared when target is deleted
+Note: `delete-orphan?` already tested extensively in `delete_orphan_edge_cases_test.clj`
 
 ### 10. Self-referential relationships
 
@@ -147,9 +152,41 @@ Test many-to-many patterns:
 
 ---
 
+## Automigration Testing
+
+### 12. Schema introspection tests
+
+**Priority:** Medium
+
+Verify generated schema matches expectations by querying `pg_catalog`:
+- Column types match `sql-type` output (e.g., `VARCHAR(200)`, `UUID`, `BIGINT`)
+- Sequences created for int/long identity columns
+- Indexes created for identity columns
+- Foreign key references exist
+
+### 13. Constraint verification tests
+
+**Priority:** Low
+
+Document and test constraint behavior:
+- Verify which constraints ARE created (FK, unique index on id)
+- Verify which constraints are NOT created (NOT NULL, UNIQUE on non-id)
+- Test `::pg2/max-length` produces correct `VARCHAR(n)`
+
+### 14. Migration diff testing
+
+**Priority:** Low
+
+Test incremental schema updates:
+- Existing schema + new attribute → generates ALTER TABLE ADD COLUMN
+- Existing schema + modified attribute → correct behavior (or error)
+- Idempotency: running same migration twice is safe (IF NOT EXISTS)
+
+---
+
 ## Documentation
 
-### 13. Update documentation
+### 15. Update documentation
 
 **Priority:** Medium
 
