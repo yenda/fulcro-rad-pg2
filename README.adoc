@@ -1,20 +1,21 @@
-= SQL Database Plugin
+= fulcro-rad-pg2
 
 A PostgreSQL plugin for Fulcro RAD using the pg2 driver.
 
-image:https://img.shields.io/clojars/v/com.fulcrologic/fulcro-rad-sql.svg[link=https://clojars.org/com.fulcrologic/fulcro-rad-sql]
+This is a PostgreSQL-only adapter optimized for performance using the native pg2 driver.
+For multi-database support (H2, MariaDB, MySQL), see the original `fulcro-rad-sql` project.
 
 == Configuration
 
-In order to use the SQL plugin you must configure connection pools and optionally enable schema management.
+In order to use the pg2 plugin you must configure connection pools.
 
 The general layout of a config (which commonly includes `config/defaults.edn` on your classpath) should include:
 
 [source,clojure]
 -----
 ...
- :com.fulcrologic.rad.database-adapters.sql/databases
-   {:main {:sql/schema :production}}
+ :com.fulcrologic.rad.database-adapters.pg2/databases
+   {:main {:pg2/schema :production}}
 ...
 -----
 
@@ -33,7 +34,7 @@ This library uses the pg2 PostgreSQL driver for connection pooling.
 (ns com.example.components.connection-pools
   (:require
     [mount.core :refer [defstate]]
-    [com.fulcrologic.rad.database-adapters.sql.pg2 :as pg2]
+    [com.fulcrologic.rad.database-adapters.pg2.driver :as pg2]
     [pg.pool :as pg.pool]))
 
 (def pg2-config
@@ -50,11 +51,11 @@ This library uses the pg2 PostgreSQL driver for connection pooling.
   (pg2/stop-connection-pools! connection-pools))
 -----
 
-The configuration options for the SQL adapter look like this:
+The configuration options for the pg2 adapter look like this:
 
 [source]
 -----
- :com.fulcrologic.rad.database-adapters.sql/databases
+ :com.fulcrologic.rad.database-adapters.pg2/databases
    {:main {:pg2/config {:host "localhost"
                         :port 5432
                         :user "myuser"
@@ -62,8 +63,8 @@ The configuration options for the SQL adapter look like this:
                         :database "mydb"}
            :pg2/pool {:pool-min-size 2
                       :pool-max-size 10}
-           :sql/auto-create-missing? true
-           :sql/schema :production}}
+           :pg2/auto-create-missing? true
+           :pg2/schema :production}}
 -----
 
 === Schema Generation
@@ -76,25 +77,25 @@ The automatic schema generation just tries to generate columns in tables if (and
 This is reasonable for really fast startup of a project, but is almost certainly insufficient for real projects.
 
 For production use, manage your schema with a migration tool of your choice (e.g., Flyway, Migratus, or plain SQL scripts).
-The `com.fulcrologic.rad.database-adapters.sql.migration/automatic-schema` function can generate DDL statements
+The `com.fulcrologic.rad.database-adapters.pg2.migration/automatic-schema` function can generate DDL statements
 that you can use as a starting point for your migrations
 
 == Attributes
 
-RAD attributes that will be used in an SQL database can be configured as follows (where the sql namespace is `com.fulcrologic.rad.database-adapters.sql`):
+RAD attributes that will be used in a PostgreSQL database can be configured as follows (where the pg2 namespace is `com.fulcrologic.rad.database-adapters.pg2`):
 
 `::attr/schema`:: (required) A keyword that matches the schema you want to store the attribute on.
 `::attr/identities`:: (required on non-identity attributes) A set of keyword (names) of the id attributes
 that identify tables for which this attribute is a row.
-`::sql/column-name`:: (optional) A string to use to override the automatic column name.
-`::sql/table-name`:: (optional, but only on identity attributes) A string. Overrides the table name that goes
+`::pg2/column-name`:: (optional) A string to use to override the automatic column name.
+`::pg2/table-name`:: (optional, but only on identity attributes) A string. Overrides the table name that goes
 with a given identity attribute.
 
 == Resolvers and Save Middleware [[Resolvers]]
 
 The library supports generation of batched Pathom3 resolvers that can run queries against PostgreSQL tables.
 
-There is also save middleware that handles form saves via the SQL adapter.
+There is also save middleware that handles form saves via the pg2 adapter.
 
 === Save Middleware
 
@@ -102,15 +103,15 @@ There is also save middleware that handles form saves via the SQL adapter.
 -----
 (ns com.example.components.save-middleware
   (:require
-    [com.fulcrologic.rad.database-adapters.sql.plugin :as sql-plugin]))
+    [com.fulcrologic.rad.database-adapters.pg2.plugin :as pg2-plugin]))
 
 (def middleware
-  (-> (sql-plugin/wrap-sql-save)
+  (-> (pg2-plugin/wrap-pg2-save)
       ;; add other middleware here
       ))
 -----
 
-=== SQL Resolvers
+=== pg2 Resolvers
 
 [source,clojure]
 -----
@@ -119,7 +120,7 @@ There is also save middleware that handles form saves via the SQL adapter.
     [com.example.model :refer [all-attributes]]
     [mount.core :refer [defstate]]
     [com.fulcrologic.rad.resolvers :as res]
-    [com.fulcrologic.rad.database-adapters.sql.read :as sql-read]))
+    [com.fulcrologic.rad.database-adapters.pg2.read :as pg2-read]))
 
 (defstate automatic-resolvers
   :start
@@ -127,11 +128,11 @@ There is also save middleware that handles form saves via the SQL adapter.
     (concat
       ;; custom resolvers that are declared on attributes
       (res/generate-resolvers all-attributes)
-      ;; SQL resolvers for PostgreSQL
-      (sql-read/generate-resolvers all-attributes :production))))
+      ;; pg2 resolvers for PostgreSQL
+      (pg2-read/generate-resolvers all-attributes :production))))
 -----
 
-If you have more than one schema, simply call `sql-read/generate-resolvers` once for each schema.
+If you have more than one schema, simply call `pg2-read/generate-resolvers` once for each schema.
 It returns a sequence of resolvers that can be installed into your parser.
 
 == The Parser
@@ -146,7 +147,7 @@ something like this:
     [com.example.components.auto-resolvers :refer [automatic-resolvers]]
     [com.example.components.config :refer [config]]
     [com.example.components.connection-pools :as pools]
-    [com.fulcrologic.rad.database-adapters.sql.plugin :as sql]
+    [com.fulcrologic.rad.database-adapters.pg2.plugin :as pg2]
     [com.fulcrologic.rad.pathom :as pathom]
     [com.fulcrologic.rad.form :as form]
     [com.fulcrologic.rad.blob :as blob]
@@ -165,11 +166,15 @@ something like this:
   (pathom/new-parser config
     [(rad.attr/pathom-plugin all-attributes)
      (form/pathom-plugin save/middleware delete/middleware)
-     (sql/pathom-plugin (fn [_] {:production (:main pools/connection-pools)}) config)]
+     (pg2/pathom-plugin (fn [_] {:production (:main pools/connection-pools)}) config)]
     [automatic-resolvers
      form/resolvers
      ...]))
 -----
+
+== Migrating from fulcro-rad-sql
+
+See link:MIGRATION.md[MIGRATION.md] for a detailed guide on migrating from `fulcro-rad-sql`.
 
 == LICENSE
 

@@ -7,11 +7,11 @@
 
    Options covered:
    - table, column-name, max-length
-   - owns-ref?, ref, delete-referent?, order-by
+   - fk-attr, delete-orphan?, order-by
    - model->sql-value, sql->model-value"
   (:require
    [com.fulcrologic.rad.attributes :as rad.attr :refer [defattr]]
-   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]))
+   [com.fulcrologic.rad.database-adapters.pg2 :as rad.pg2]))
 
 ;; =============================================================================
 ;; Account - demonstrates basic types and to-one/to-many refs
@@ -20,12 +20,12 @@
 (defattr account-id :account/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "accounts"})
+   ::rad.pg2/table "accounts"})
 
 (defattr account-name :account/name :string
   {::rad.attr/schema :production
    ::rad.attr/identities #{:account/id}
-   ::rad.sql/max-length 200})
+   ::rad.pg2/max-length 200})
 
 (defattr account-email :account/email :string
   {::rad.attr/schema :production
@@ -34,7 +34,7 @@
 (defattr account-active? :account/active? :boolean
   {::rad.attr/schema :production
    ::rad.attr/identities #{:account/id}
-   ::rad.sql/column-name "active"})
+   ::rad.pg2/column-name "active"})
 
 ;; To-one forward ref (account owns the FK column)
 (defattr account-primary-address :account/primary-address :ref
@@ -49,7 +49,7 @@
    ::rad.attr/target :address/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:account/id}
-   ::rad.sql/fk-attr :address/account})
+   ::rad.pg2/fk-attr :address/account})
 
 ;; Derived data (no schema - not persisted)
 (defattr account-locked? :account/locked? :boolean
@@ -66,7 +66,7 @@
 (defattr addr-id :address/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "addresses"})
+   ::rad.pg2/table "addresses"})
 
 (defattr addr-street :address/street :string
   {::rad.attr/schema :production
@@ -104,7 +104,7 @@
 (defattr user-id :user/id :uuid
   {::rad.attr/schema :production
    ::rad.attr/identity? true
-   ::rad.sql/table "users"})
+   ::rad.pg2/table "users"})
 
 (defattr user-name :user/name :string
   {::rad.attr/schema :production
@@ -119,12 +119,12 @@
 (defattr product-id :product/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "products"})
+   ::rad.pg2/table "products"})
 
 (defattr product-name :product/name :string
   {::rad.attr/schema :production
    ::rad.attr/identities #{:product/id}
-   ::rad.sql/max-length 100})
+   ::rad.pg2/max-length 100})
 
 ;; :int type -> INTEGER
 (defattr product-quantity :product/quantity :int
@@ -167,7 +167,7 @@
 (defattr event-id :event/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "events"})
+   ::rad.pg2/table "events"})
 
 (defattr event-name :event/name :string
   {::rad.attr/schema :production
@@ -186,13 +186,13 @@
 (def event-attributes [event-id event-name event-starts-at event-ends-at])
 
 ;; =============================================================================
-;; Category - demonstrates self-referential and delete-referent?
+;; Category - demonstrates self-referential and delete-orphan?
 ;; =============================================================================
 
 (defattr category-id :category/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "categories"})
+   ::rad.pg2/table "categories"})
 
 (defattr category-name :category/name :string
   {::rad.attr/schema :production
@@ -211,8 +211,8 @@
    ::rad.attr/target :category/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:category/id}
-   ::rad.sql/fk-attr :category/parent
-   ::rad.sql/order-by :category/name})
+   ::rad.pg2/fk-attr :category/parent
+   ::rad.pg2/order-by :category/name})
 
 ;; Position for ordering
 (defattr category-position :category/position :int
@@ -223,18 +223,18 @@
   [category-id category-name category-parent category-children category-position])
 
 ;; =============================================================================
-;; Document / Metadata - demonstrates one-to-one with delete-referent?
+;; Document / Metadata - demonstrates one-to-one with delete-orphan?
 ;;
 ;; Pattern: Metadata owns the FK (metadata.document_id column)
 ;; - document/metadata has `ref` pointing to metadata's FK attr
-;; - document/metadata has `delete-referent?` (orphaned metadata gets deleted)
+;; - document/metadata has `delete-orphan?` (orphaned metadata gets deleted)
 ;; - metadata/document stores the FK directly (no `ref`)
 ;; =============================================================================
 
 (defattr document-id :document/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "documents"})
+   ::rad.pg2/table "documents"})
 
 (defattr document-title :document/title :string
   {::rad.attr/schema :production
@@ -247,8 +247,8 @@
    ::rad.attr/target :metadata/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:document/id}
-   ::rad.sql/fk-attr :metadata/document    ; FK is stored by :metadata/document
-   ::rad.sql/delete-orphan? true})        ; Delete orphaned metadata
+   ::rad.pg2/fk-attr :metadata/document    ; FK is stored by :metadata/document
+   ::rad.pg2/delete-orphan? true})        ; Delete orphaned metadata
 
 (def document-attributes [document-id document-title document-metadata])
 
@@ -259,7 +259,7 @@
 (defattr metadata-id :metadata/id :uuid
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "metadata"})
+   ::rad.pg2/table "metadata"})
 
 (defattr metadata-author :metadata/author :string
   {::rad.attr/schema :production
@@ -275,7 +275,7 @@
    ::rad.attr/target :document/id
    ::rad.attr/schema :production
    ::rad.attr/identities #{:metadata/id}
-   ::rad.sql/column-name "document_id"})  ; Explicit FK column, no `ref`
+   ::rad.pg2/column-name "document_id"})  ; Explicit FK column, no `ref`
 
 (def metadata-attributes [metadata-id metadata-author metadata-version metadata-document])
 
@@ -286,12 +286,12 @@
 (defattr item-id :item/id :long
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "items"})
+   ::rad.pg2/table "items"})
 
 (defattr item-name :item/name :string
   {::rad.attr/schema :production
    ::rad.attr/identities #{:item/id}
-   ::rad.sql/max-length 200})
+   ::rad.pg2/max-length 200})
 
 (defattr item-quantity :item/quantity :int
   {::rad.attr/schema :production
@@ -300,7 +300,7 @@
 (defattr item-active :item/active? :boolean
   {::rad.attr/schema :production
    ::rad.attr/identities #{:item/id}
-   ::rad.sql/column-name "active"})
+   ::rad.pg2/column-name "active"})
 
 ;; To-one ref from item to account (item has FK to account)
 (defattr item-owner :item/owner :ref
@@ -318,7 +318,7 @@
 (defattr line-item-id :line-item/id :long
   {::rad.attr/identity? true
    ::rad.attr/schema :production
-   ::rad.sql/table "line_items"})
+   ::rad.pg2/table "line_items"})
 
 (defattr line-item-description :line-item/description :string
   {::rad.attr/schema :production

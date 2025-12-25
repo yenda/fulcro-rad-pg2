@@ -1,8 +1,15 @@
+---
+status: stable
+contributions:
+  - Add examples for JSON/JSONB handling via transformers
+  - Document PostgreSQL-specific type considerations
+  - Add performance notes for large string types
+---
 = Type Reference
 :toc:
 :toclevels: 3
 
-This document provides a comprehensive reference for the types and options supported by fulcro-rad-sql.
+This document provides a comprehensive reference for the types and options supported by fulcro-rad-pg2.
 
 == Supported RAD Types
 
@@ -77,14 +84,14 @@ The following RAD attribute types are supported and mapped to PostgreSQL types:
 
 ==== String Types
 
-`:string`, `:password`, `:keyword`, `:symbol`, and `:enum` are all stored as `VARCHAR`. The default lengths vary by type but can be customized using the `::sql/max-length` option.
+`:string`, `:password`, `:keyword`, `:symbol`, and `:enum` are all stored as `VARCHAR`. The default lengths vary by type but can be customized using the `::pg2/max-length` option.
 
 [source,clojure]
 ----
 (defattr user-name :user/name :string
   {::attr/schema :production
    ::attr/identities #{:user/id}
-   ::sql/max-length 100})  ; VARCHAR(100) instead of default VARCHAR(2048)
+   ::pg2/max-length 100})  ; VARCHAR(100) instead of default VARCHAR(2048)
 ----
 
 ==== Numeric Types
@@ -109,43 +116,43 @@ Enumerations are stored as strings rather than native PostgreSQL `ENUM` types. T
    ::attr/identities #{:order/id}})
 ----
 
-== SQL Options
+== pg2 Options
 
-These options are defined in the `com.fulcrologic.rad.database-adapters.sql` namespace.
+These options are defined in the `com.fulcrologic.rad.database-adapters.pg2` namespace.
 
 [cols="2,3,2"]
 |===
 |Option |Purpose |Used On
 
-|`::sql/table`
+|`::pg2/table`
 |Specifies the database table name for an entity
 |Identity attributes only
 
-|`::sql/column-name`
+|`::pg2/column-name`
 |Overrides the default column name (which is derived from the attribute name using snake_case)
 |Any attribute
 
-|`::sql/max-length`
+|`::pg2/max-length`
 |Sets the VARCHAR length for string-based types
 |`:string`, `:password`, `:keyword`, `:symbol`, `:enum`
 
-|`::sql/fk-attr`
+|`::pg2/fk-attr`
 |Specifies which attribute owns the FK (for reverse/virtual references where FK is on target table)
 |`:ref` attributes (both cardinalities)
 
-|`::sql/delete-orphan?`
+|`::pg2/delete-orphan?`
 |When a reference is removed, delete the orphaned entity. Only valid with `fk-attr`.
 |`:ref` attributes with `fk-attr`
 
-|`::sql/order-by`
+|`::pg2/order-by`
 |Default ordering for to-many relationships
 |To-many `:ref` attributes
 
-|`::sql/model->sql-value`
+|`::pg2/model->sql-value`
 |Custom transformer function `(fn [clj-value] sql-value)` for writing
 |Any attribute
 
-|`::sql/sql->model-value`
+|`::pg2/sql->model-value`
 |Custom transformer function `(fn [sql-value] clj-value)` for reading
 |Any attribute
 |===
@@ -159,12 +166,12 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
 (defattr user-id :user/id :uuid
   {::attr/identity? true
    ::attr/schema :production
-   ::sql/table "app_users"})  ; Custom table name
+   ::pg2/table "app_users"})  ; Custom table name
 
 (defattr user-created :user/created-at :instant
   {::attr/schema :production
    ::attr/identities #{:user/id}
-   ::sql/column-name "created_timestamp"})  ; Custom column name
+   ::pg2/column-name "created_timestamp"})  ; Custom column name
 ----
 
 ==== References
@@ -184,7 +191,7 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
    ::attr/target :line-item/id
    ::attr/schema :production
    ::attr/identities #{:order/id}
-   ::sql/fk-attr :line-item/order})  ; FK is stored by :line-item/order
+   ::pg2/fk-attr :line-item/order})  ; FK is stored by :line-item/order
 
 ;; Owned component (deleted when parent reference changes)
 (defattr document-metadata :document/metadata :ref
@@ -192,8 +199,8 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
    ::attr/target :metadata/id
    ::attr/schema :production
    ::attr/identities #{:document/id}
-   ::sql/fk-attr :metadata/document   ; FK stored by :metadata/document
-   ::sql/delete-orphan? true})        ; Delete orphaned metadata
+   ::pg2/fk-attr :metadata/document   ; FK stored by :metadata/document
+   ::pg2/delete-orphan? true})        ; Delete orphaned metadata
 ----
 
 ==== Value Transformers
@@ -203,8 +210,8 @@ These options are defined in the `com.fulcrologic.rad.database-adapters.sql` nam
 (defattr user-preferences :user/preferences :string
   {::attr/schema :production
    ::attr/identities #{:user/id}
-   ::sql/model->sql-value pr-str           ; Clojure map -> EDN string
-   ::sql/sql->model-value edn/read-string}) ; EDN string -> Clojure map
+   ::pg2/model->sql-value pr-str           ; Clojure map -> EDN string
+   ::pg2/sql->model-value edn/read-string}) ; EDN string -> Clojure map
 ----
 
 == Test Coverage
@@ -298,7 +305,7 @@ The test suite includes property-based testing with generators for all supported
 
 == Unsupported PostgreSQL Types
 
-The following PostgreSQL types are NOT currently supported by fulcro-rad-sql:
+The following PostgreSQL types are NOT currently supported by fulcro-rad-pg2:
 
 [cols="1,2,2"]
 |===
@@ -339,6 +346,6 @@ The following PostgreSQL types are NOT currently supported by fulcro-rad-sql:
 
 To use unsupported types, you can:
 
-1. Use `::sql/model->sql-value` and `::sql/sql->model-value` transformers to convert between a supported type and your desired representation
+1. Use `::pg2/model->sql-value` and `::pg2/sql->model-value` transformers to convert between a supported type and your desired representation
 2. Store complex data as JSON strings in a `:string` field with custom transformers
 3. Use raw SQL for operations that require native PostgreSQL types

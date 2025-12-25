@@ -3,11 +3,11 @@
    [clojure.string :as str]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
-   [com.fulcrologic.rad.database-adapters.sql :as rad.sql]
-   [com.fulcrologic.rad.database-adapters.sql.migration :as mig]
-   [com.fulcrologic.rad.database-adapters.sql.perf.attributes :as perf-attrs]
-   [com.fulcrologic.rad.database-adapters.sql.perf.benchmark :as bench]
-   [com.fulcrologic.rad.database-adapters.sql.write :as write]
+   [com.fulcrologic.rad.database-adapters.pg2 :as rad.pg2]
+   [com.fulcrologic.rad.database-adapters.pg2.migration :as mig]
+   [com.fulcrologic.rad.database-adapters.pg2.perf.attributes :as perf-attrs]
+   [com.fulcrologic.rad.database-adapters.pg2.perf.benchmark :as bench]
+   [com.fulcrologic.rad.database-adapters.pg2.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
    [pg.core :as pg]
    [pg.pool :as pg.pool]
@@ -62,7 +62,7 @@
             (pg/execute conn stmt))))
 
       (let [env {::attr/key->attribute key->attribute
-                 ::rad.sql/connection-pools {:perf pg2-pool}}
+                 ::rad.pg2/connection-pools {:perf pg2-pool}}
             clear! #(pg.pool/with-conn [conn pg2-pool]
                       (pg/execute conn "TRUNCATE TABLE addresses CASCADE"))]
 
