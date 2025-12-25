@@ -121,6 +121,17 @@
 ;; =============================================================================
 ;; Test: 5-Level Deep Query
 ;; Organization → Project → Issue → Comment → Reaction
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr
+;;
+;; Types exercised:
+;;   :uuid, :long (sequence ID), :string, :boolean, :enum, :instant, :ref
+;;
+;; Patterns:
+;;   - To-many reverse refs (fk-attr on child)
+;;   - Sequence-based ID generation (:long)
+;;   - 5-level deep nested query
 ;; =============================================================================
 
 (deftest five-level-deep-query-test
@@ -205,7 +216,19 @@
                  :issue/comments first :comment/reactions first :reaction/type))))))
 
 ;; =============================================================================
-;; Test: Many-to-Many via Join Tables
+;; Test: Many-to-Many Issue ↔ Labels
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr, ::pg2/order-by, ::pg2/max-length
+;;
+;; Types exercised:
+;;   :uuid, :long, :string, :keyword, :int, :enum, :instant, :ref
+;;
+;; Patterns:
+;;   - Many-to-many relationship via join table (IssueLabel)
+;;   - Join table with metadata (added-at timestamp)
+;;   - :keyword type for color (Label)
+;;   - :int type for position ordering (Label)
 ;; =============================================================================
 
 (deftest many-to-many-issue-labels-test
@@ -278,6 +301,21 @@
                              set)]
         (is (= #{"bug" "enhancement"} label-names))))))
 
+;; =============================================================================
+;; Test: Many-to-Many Issue ↔ Assignees
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr
+;;
+;; Types exercised:
+;;   :uuid, :long, :string, :boolean, :enum, :instant, :ref
+;;
+;; Patterns:
+;;   - Many-to-many relationship via join table (IssueAssignee)
+;;   - Join table with metadata (primary? flag, assigned-at)
+;;   - :boolean in join table for primary assignee flag
+;; =============================================================================
+
 (deftest many-to-many-issue-assignees-test
   (testing "Issue ↔ User assignees many-to-many relationship"
     (let [user1-id (ids/new-uuid)
@@ -348,6 +386,18 @@
 
 ;; =============================================================================
 ;; Test: Self-Referential Hierarchy
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr, ::pg2/order-by
+;;
+;; Types exercised:
+;;   :uuid, :long, :string, :boolean, :enum, :instant, :int, :ref
+;;
+;; Patterns:
+;;   - Self-referential to-one (issue/parent)
+;;   - Self-referential to-many (issue/children)
+;;   - ::pg2/order-by on self-referential collection (:issue/priority-order)
+;;   - Bidirectional navigation (parent → children, child → parent)
 ;; =============================================================================
 
 (deftest self-referential-issue-hierarchy-test
@@ -433,7 +483,19 @@
       (is (= :issue.type/epic (-> child-query :issue/parent :issue/type))))))
 
 ;; =============================================================================
-;; Test: Custom Value Transformers
+;; Test: Custom Value Transformer - JSON
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/max-length,
+;;   ::pg2/form->sql-value, ::pg2/sql->form-value
+;;
+;; Types exercised:
+;;   :uuid, :string, :password, :instant, :ref
+;;
+;; Patterns:
+;;   - Custom transformer pair for JSON serialization (ApiToken permissions)
+;;   - Map data stored as JSON string in PostgreSQL
+;;   - Round-trip verification (Clojure → JSON string → Clojure)
 ;; =============================================================================
 
 (deftest custom-transformer-json-test
@@ -461,6 +523,22 @@
       (is (= "CI Token" (:api-token/name query-result)))
       ;; Permissions should be decoded back to map
       (is (= permissions (:api-token/permissions query-result))))))
+
+;; =============================================================================
+;; Test: Custom Value Transformer - CSV Tags
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/max-length,
+;;   ::pg2/form->sql-value, ::pg2/sql->form-value
+;;
+;; Types exercised:
+;;   :uuid, :string, :boolean, :password, :ref
+;;
+;; Patterns:
+;;   - Custom transformer pair for CSV tag serialization (Webhook events)
+;;   - Vector of keywords stored as comma-separated string
+;;   - Round-trip verification (keywords → CSV string → keywords)
+;; =============================================================================
 
 (deftest custom-transformer-csv-tags-test
   (testing "Custom CSV transformer for webhook events"
@@ -491,7 +569,18 @@
       (is (= events (:webhook/events query-result))))))
 
 ;; =============================================================================
-;; Test: delete-orphan? Behavior
+;; Test: delete-orphan? - API Tokens
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr, ::pg2/delete-orphan?
+;;
+;; Types exercised:
+;;   :uuid, :string, :boolean, :password, :ref
+;;
+;; Patterns:
+;;   - Owned component relationship (User owns ApiTokens)
+;;   - Cascade delete when reference removed from parent's collection
+;;   - Verifies entity is deleted from database (not just unlinked)
 ;; =============================================================================
 
 (deftest delete-orphan-api-tokens-test
@@ -526,6 +615,21 @@
                        [:api-token/name])]
 
       (is (nil? (:api-token/name after-query))))))
+
+;; =============================================================================
+;; Test: delete-orphan? - Comment Reactions
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr, ::pg2/delete-orphan?
+;;
+;; Types exercised:
+;;   :uuid, :long, :string, :boolean, :enum, :instant, :ref
+;;
+;; Patterns:
+;;   - Owned component in nested hierarchy (Comment → Reaction at level 5)
+;;   - Cascade delete on deeply nested entity
+;;   - delete-orphan? on to-many with fk-attr
+;; =============================================================================
 
 (deftest delete-orphan-comment-reactions-test
   (testing "delete-orphan? removes reactions when removed from comment"
@@ -586,7 +690,28 @@
       (is (nil? (:reaction/type after-query))))))
 
 ;; =============================================================================
-;; Test: All Attribute Types
+;; Test: All Attribute Types Round-Trip
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name
+;;
+;; Types exercised (ALL supported types):
+;;   :uuid     - Organization, Project, User IDs
+;;   :long     - Issue ID (sequence-generated)
+;;   :int      - priority-order, vote-count
+;;   :string   - title, description, email
+;;   :password - password-hash
+;;   :boolean  - active?, admin?
+;;   :decimal  - estimate, time-spent, budget
+;;   :instant  - created-at, due-date, last-login-at
+;;   :enum     - status, priority, type
+;;   :symbol   - workflow-state, default-workflow
+;;   :ref      - to-one relationships (project, reporter)
+;;
+;; Patterns:
+;;   - Comprehensive type round-trip verification
+;;   - All scalar types written and read back correctly
+;;   - Nested refs verify types at multiple levels
 ;; =============================================================================
 
 (deftest all-attribute-types-test
@@ -681,6 +806,17 @@
 
 ;; =============================================================================
 ;; Test: order-by on Collections
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/fk-attr, ::pg2/order-by
+;;
+;; Types exercised:
+;;   :uuid, :string, :keyword, :int, :ref
+;;
+;; Patterns:
+;;   - Ordered to-many collection (project/labels ordered by :label/position)
+;;   - Verifies order is preserved regardless of insertion order
+;;   - :int type used for explicit ordering
 ;; =============================================================================
 
 (deftest order-by-labels-test
@@ -724,6 +860,18 @@
 ;; =============================================================================
 ;; Test: Alternative 5-Level Path
 ;; Organization → Team → TeamMember → User → Notification
+;;
+;; Options exercised:
+;;   ::pg2/table, ::pg2/column-name, ::pg2/fk-attr, ::pg2/order-by
+;;
+;; Types exercised:
+;;   :uuid, :string, :boolean, :enum, :instant, :ref
+;;
+;; Patterns:
+;;   - Alternative 5-level deep query path (not via Issue/Comment)
+;;   - Many-to-many with role (Team ↔ User via TeamMember)
+;;   - Ordered to-many (notifications ordered by created-at)
+;;   - Traversing through join table with metadata (role, joined-at)
 ;; =============================================================================
 
 (deftest alternative-five-level-path-test
