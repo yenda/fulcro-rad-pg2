@@ -113,11 +113,49 @@ Update operations:
 
 ---
 
+## Additional Test Coverage
+
+### 9. Delete operations
+
+**Priority:** Medium
+
+No tests verify delete functionality:
+- Delete single entity
+- Delete with cascade (owned components)
+- Delete with `::pg2/delete-orphan?` behavior
+- Verify refs are cleared when target is deleted
+
+### 10. Self-referential relationships
+
+**Priority:** Medium
+
+Test hierarchical/recursive relationships:
+- Parent/child issues (`issue/parent` → `issue/children`)
+- Query parent from child
+- Query children from parent
+- Multiple levels deep
+
+### 11. Many-to-many through join table
+
+**Priority:** Low
+
+Test many-to-many patterns:
+- Issue ↔ Label through IssueLabel
+- Query labels for issue
+- Query issues for label
+- Add/remove associations
+
+---
+
 ## Performance Tests
 
-The `perf/` directory contains read benchmarks. Consider adding:
+### 12. Write benchmarks
 
-- Write benchmarks (single insert, batch insert)
+**Priority:** Low
+
+The `perf/` directory contains read benchmarks. Add:
+- Single insert benchmark
+- Batch insert benchmark (10, 50, 100 entities)
 - Update benchmarks
 - Delete benchmarks (with cascade)
 - Mixed workload benchmarks
@@ -126,6 +164,18 @@ The `perf/` directory contains read benchmarks. Consider adding:
 
 ## Documentation
 
-- Document the `sql->form-value` limitation until fixed
+### 13. Update documentation
+
+**Priority:** Medium
+
+- ~~Document the `sql->form-value` limitation~~ (now fixed)
 - Add migration guide from fulcro-rad-sql
-- Document all supported attribute options with examples
+- Document all supported attribute options with examples:
+  - `::pg2/table`
+  - `::pg2/column-name`
+  - `::pg2/fk-attr`
+  - `::pg2/max-length`
+  - `::pg2/form->sql-value`
+  - `::pg2/sql->form-value`
+  - `::pg2/delete-orphan?`
+  - `::pg2/order-by`
