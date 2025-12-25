@@ -1229,3 +1229,48 @@
           "Project 1 should have 3 issues")
       (is (= 0 (count (-> results (get [:project/id (nth project-ids 2)]) :project/issues)))
           "Project 2 should have 0 issues (empty vector)"))))
+
+;; =============================================================================
+;; ERROR SCENARIO TESTS
+;;
+;; Tests for database constraint violations
+;; =============================================================================
+
+(deftest fk-violation-throws-exception-test
+  (testing "Foreign key violation throws exception"
+    (let [fake-project-id (java.util.UUID/randomUUID)
+          user-id (create! :user/id (fn [_] {:user/email {:after "fk-error@example.com"}
+                                             :user/username {:after "fkerror"}
+                                             :user/active? {:after true}}))]
+      ;; Try to create issue with non-existent project
+      (is (thrown? Exception
+                   (create! :issue/id (fn [_] {:issue/title {:after "Bad Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id fake-project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}})))
+          "Should throw exception for FK violation"))))
+
+(deftest duplicate-allowed-without-unique-constraint-test
+  (testing "Duplicate values allowed when no UNIQUE constraint exists"
+    ;; Note: The automatic schema generator doesn't create UNIQUE constraints.
+    ;; Fulcro RAD's ::attr/required? is a form-level validation, not a DB constraint.
+    ;; This test documents that behavior.
+    (create! :user/id (fn [_] {:user/email {:after "dupe@example.com"}
+                               :user/username {:after "dupe1"}
+                               :user/active? {:after true}}))
+    ;; Second user with same email succeeds because no UNIQUE constraint
+    (let [user2-id (create! :user/id (fn [_] {:user/email {:after "dupe@example.com"}
+                                              :user/username {:after "dupe2"}
+                                              :user/active? {:after true}}))]
+      (is (some? user2-id) "Duplicate email allowed without UNIQUE constraint"))))
+
+(deftest null-allowed-without-not-null-constraint-test
+  (testing "NULL values allowed when no NOT NULL constraint exists"
+    ;; Note: The automatic schema generator doesn't create NOT NULL constraints.
+    ;; Fulcro RAD's ::attr/required? is a form-level validation, not a DB constraint.
+    ;; This test documents that behavior.
+    (let [user-id (create! :user/id (fn [_] {:user/username {:after "nomail"}
+                                             :user/active? {:after true}}))]
+      (is (some? user-id) "NULL email allowed without NOT NULL constraint"))))
