@@ -142,15 +142,18 @@ Note: `delete-orphan?` already tested extensively in `delete_orphan_edge_cases_t
 - `self-ref-reparent-issue-test` - Move child to different parent
 - `self-ref-batch-query-test` - Batch query multiple parents with independent children
 
-### 11. Many-to-many through join table
+### 11. ~~Many-to-many through join table~~ DONE
 
-**Priority:** Low
-
-Test many-to-many patterns:
-- Issue ↔ Label through IssueLabel
-- Query labels for issue
-- Query issues for label
-- Add/remove associations
+**Status:** DONE
+**Tests added:**
+- `m2m-query-labels-for-issue-test` - Query labels via `:issue/labels` → IssueLabel → Label
+- `m2m-query-issues-for-label-test` - Reverse lookup via SQL (no direct resolver)
+- `m2m-add-label-to-issue-test` - Add label by creating IssueLabel entity
+- `m2m-remove-label-from-issue-test` - Remove label by deleting IssueLabel entity
+- `m2m-issue-with-no-labels-test` - Empty labels returns `[]`
+- `m2m-multiple-issues-same-label-test` - Shared label across 3 issues
+- `m2m-one-issue-multiple-labels-test` - Issue with 5 labels
+- `m2m-batch-query-issues-with-labels-test` - Batch query with joins
 
 ---
 
