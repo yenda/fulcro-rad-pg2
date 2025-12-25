@@ -228,18 +228,23 @@ Edge cases:
 
 ## Documentation
 
-### 15. Update documentation
+### 15. ~~Update documentation~~ DONE
 
-**Priority:** Medium
+**Status:** DONE
 
-- ~~Document the `sql->form-value` limitation~~ (now fixed)
-- Add migration guide from fulcro-rad-sql
-- Document all supported attribute options with examples:
-  - `::pg2/table`
-  - `::pg2/column-name`
-  - `::pg2/fk-attr`
-  - `::pg2/max-length`
-  - `::pg2/form->sql-value`
-  - `::pg2/sql->form-value`
-  - `::pg2/delete-orphan?`
-  - `::pg2/order-by`
+Documentation added:
+- **README.md** - Comprehensive project documentation with:
+  - Quick start guide
+  - Installation instructions
+  - All attribute options with examples:
+    - `::pg2/table` - Custom table names
+    - `::pg2/column-name` - Custom column names
+    - `::pg2/fk-attr` - Reverse FK for to-many relationships
+    - `::pg2/max-length` - VARCHAR length limits
+    - `::pg2/form->sql-value` - Custom write transformers
+    - `::pg2/sql->form-value` - Custom read transformers
+    - `::pg2/delete-orphan?` - Cascade delete for owned relationships
+    - `::pg2/order-by` - Sorted collections
+  - Supported types table
+  - Relationship pattern examples (to-one, to-many, M:M, self-ref)
+- **MIGRATION.md** - Already existed with comprehensive migration guide from fulcro-rad-sql
