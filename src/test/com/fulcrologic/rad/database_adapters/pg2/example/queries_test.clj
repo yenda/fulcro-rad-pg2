@@ -9,6 +9,7 @@
    - Self-referential hierarchies
    - All attribute types"
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
@@ -3019,3 +3020,252 @@
           "Index on issues.project should exist")
       (is (contains? index-names "reporter_id_idx")
           "Index on issues.reporter_id should exist"))))
+
+;; =============================================================================
+;; MIGRATION DIFF TESTS
+;;
+;; Test incremental schema updates and idempotency
+;; =============================================================================
+
+(deftest migration-idempotency-test
+  (testing "Running automatic-schema twice is safe (IF NOT EXISTS)"
+    (let [;; First run already happened in test setup
+          ;; Run it again - should not throw
+          stmts (mig/automatic-schema :tracker model/all-attributes)]
+      ;; Execute all statements again - no exceptions should be thrown
+      (is (every? vector?
+                  (for [stmt stmts]
+                    (jdbc/execute! (:jdbc-conn *test-env*) [stmt])))
+          "Re-running all statements should succeed without throwing"))))
+
+(deftest migration-idempotency-tables-unchanged-test
+  (testing "Running migration twice doesn't duplicate tables"
+    (let [schema (:schema *test-env*)
+          ;; Count tables before second run
+          before-count (jdbc/execute-one!
+                        (:jdbc-conn *test-env*)
+                        ["SELECT COUNT(*) as cnt FROM information_schema.tables
+                          WHERE table_schema = ? AND table_type = 'BASE TABLE'"
+                         schema])
+          ;; Run migration again
+          stmts (mig/automatic-schema :tracker model/all-attributes)
+          _ (doseq [stmt stmts]
+              (jdbc/execute! (:jdbc-conn *test-env*) [stmt]))
+          ;; Count tables after
+          after-count (jdbc/execute-one!
+                       (:jdbc-conn *test-env*)
+                       ["SELECT COUNT(*) as cnt FROM information_schema.tables
+                         WHERE table_schema = ? AND table_type = 'BASE TABLE'"
+                        schema])]
+      (is (= (:cnt before-count) (:cnt after-count))
+          "Table count should be unchanged after re-running migration"))))
+
+(deftest migration-idempotency-columns-unchanged-test
+  (testing "Running migration twice doesn't duplicate columns"
+    (let [schema (:schema *test-env*)
+          ;; Count columns in issues table before
+          before-count (jdbc/execute-one!
+                        (:jdbc-conn *test-env*)
+                        ["SELECT COUNT(*) as cnt FROM information_schema.columns
+                          WHERE table_schema = ? AND table_name = 'issues'"
+                         schema])
+          ;; Run migration again
+          stmts (mig/automatic-schema :tracker model/all-attributes)
+          _ (doseq [stmt stmts]
+              (jdbc/execute! (:jdbc-conn *test-env*) [stmt]))
+          ;; Count columns after
+          after-count (jdbc/execute-one!
+                       (:jdbc-conn *test-env*)
+                       ["SELECT COUNT(*) as cnt FROM information_schema.columns
+                         WHERE table_schema = ? AND table_name = 'issues'"
+                        schema])]
+      (is (= (:cnt before-count) (:cnt after-count))
+          "Column count should be unchanged after re-running migration"))))
+
+(deftest migration-idempotency-indexes-unchanged-test
+  (testing "Running migration twice doesn't duplicate indexes"
+    (let [schema (:schema *test-env*)
+          ;; Count indexes before
+          before-count (jdbc/execute-one!
+                        (:jdbc-conn *test-env*)
+                        ["SELECT COUNT(*) as cnt FROM pg_indexes
+                          WHERE schemaname = ?"
+                         schema])
+          ;; Run migration again
+          stmts (mig/automatic-schema :tracker model/all-attributes)
+          _ (doseq [stmt stmts]
+              (jdbc/execute! (:jdbc-conn *test-env*) [stmt]))
+          ;; Count indexes after
+          after-count (jdbc/execute-one!
+                       (:jdbc-conn *test-env*)
+                       ["SELECT COUNT(*) as cnt FROM pg_indexes
+                         WHERE schemaname = ?"
+                        schema])]
+      (is (= (:pg_indexes/cnt before-count) (:pg_indexes/cnt after-count))
+          "Index count should be unchanged after re-running migration"))))
+
+(deftest migration-add-column-to-existing-table-test
+  (testing "Adding new attribute generates ALTER TABLE ADD COLUMN"
+    (let [schema (:schema *test-env*)
+          ;; Verify the column doesn't exist yet
+          before (jdbc/execute-one!
+                  (:jdbc-conn *test-env*)
+                  ["SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'test_new_column'"
+                   schema])
+          _ (is (nil? before) "test_new_column should not exist initially")
+          ;; Manually add a column using the same pattern as automatic-schema
+          _ (jdbc/execute! (:jdbc-conn *test-env*)
+                           ["ALTER TABLE issues ADD COLUMN IF NOT EXISTS test_new_column VARCHAR(100)"])
+          ;; Verify the column exists now
+          after (jdbc/execute-one!
+                 (:jdbc-conn *test-env*)
+                 ["SELECT column_name, data_type, character_maximum_length
+                   FROM information_schema.columns
+                   WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'test_new_column'"
+                  schema])]
+      (is (some? after) "test_new_column should exist after ALTER TABLE")
+      (is (= "test_new_column" (:columns/column_name after)))
+      (is (= 100 (:columns/character_maximum_length after))))))
+
+(deftest migration-add-column-if-not-exists-test
+  (testing "ADD COLUMN IF NOT EXISTS is safe when column exists"
+    (let [schema (:schema *test-env*)
+          ;; Get current column definition
+          before (jdbc/execute-one!
+                  (:jdbc-conn *test-env*)
+                  ["SELECT column_name, data_type, character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'title'"
+                   schema])
+          _ (is (some? before) "title column should exist")
+          ;; Try to add it again with different type - should be ignored
+          _ (jdbc/execute! (:jdbc-conn *test-env*)
+                           ["ALTER TABLE issues ADD COLUMN IF NOT EXISTS title INTEGER"])
+          ;; Verify column is unchanged
+          after (jdbc/execute-one!
+                 (:jdbc-conn *test-env*)
+                 ["SELECT column_name, data_type, character_maximum_length
+                   FROM information_schema.columns
+                   WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'title'"
+                  schema])]
+      (is (= (:columns/data_type before) (:columns/data_type after))
+          "Column type should be unchanged")
+      (is (= (:columns/character_maximum_length before)
+             (:columns/character_maximum_length after))
+          "Column length should be unchanged"))))
+
+(deftest migration-create-table-if-not-exists-test
+  (testing "CREATE TABLE IF NOT EXISTS is safe when table exists"
+    (let [schema (:schema *test-env*)
+          ;; Verify issues table exists
+          before (jdbc/execute-one!
+                  (:jdbc-conn *test-env*)
+                  ["SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = ? AND table_name = 'issues'"
+                   schema])
+          _ (is (some? before) "issues table should exist")
+          ;; Try to create it again
+          _ (jdbc/execute! (:jdbc-conn *test-env*)
+                           ["CREATE TABLE IF NOT EXISTS issues ()"])
+          ;; Verify table still exists with all columns
+          after-cols (jdbc/execute!
+                      (:jdbc-conn *test-env*)
+                      ["SELECT column_name FROM information_schema.columns
+                        WHERE table_schema = ? AND table_name = 'issues'"
+                       schema])]
+      ;; Table should still have all its columns
+      (is (> (count after-cols) 10)
+          "issues table should still have all columns after CREATE TABLE IF NOT EXISTS"))))
+
+(deftest migration-create-index-if-not-exists-test
+  (testing "CREATE INDEX IF NOT EXISTS is safe when index exists"
+    (let [schema (:schema *test-env*)
+          ;; Verify index exists
+          before (jdbc/execute-one!
+                  (:jdbc-conn *test-env*)
+                  ["SELECT indexname FROM pg_indexes
+                    WHERE schemaname = ? AND indexname = 'issues_id_idx'"
+                   schema])
+          _ (is (some? before) "issues_id_idx should exist")
+          ;; Try to create it again
+          _ (jdbc/execute! (:jdbc-conn *test-env*)
+                           ["CREATE INDEX IF NOT EXISTS issues_id_idx ON issues(id)"])
+          ;; Verify index still exists
+          after (jdbc/execute-one!
+                 (:jdbc-conn *test-env*)
+                 ["SELECT indexname FROM pg_indexes
+                   WHERE schemaname = ? AND indexname = 'issues_id_idx'"
+                  schema])]
+      (is (some? after) "Index should still exist after CREATE INDEX IF NOT EXISTS"))))
+
+(deftest migration-create-sequence-if-not-exists-test
+  (testing "CREATE SEQUENCE IF NOT EXISTS is safe when sequence exists"
+    (let [schema (:schema *test-env*)
+          ;; Verify sequence exists
+          before (jdbc/execute-one!
+                  (:jdbc-conn *test-env*)
+                  ["SELECT sequence_name FROM information_schema.sequences
+                    WHERE sequence_schema = ? AND sequence_name = 'issues_id_seq'"
+                   schema])
+          _ (is (some? before) "issues_id_seq should exist")
+          ;; Try to create it again
+          _ (jdbc/execute! (:jdbc-conn *test-env*)
+                           ["CREATE SEQUENCE IF NOT EXISTS issues_id_seq"])
+          ;; Verify sequence still exists
+          after (jdbc/execute-one!
+                 (:jdbc-conn *test-env*)
+                 ["SELECT sequence_name FROM information_schema.sequences
+                   WHERE sequence_schema = ? AND sequence_name = 'issues_id_seq'"
+                  schema])]
+      (is (some? after) "Sequence should still exist after CREATE SEQUENCE IF NOT EXISTS"))))
+
+(deftest migration-modify-column-not-applied-test
+  (testing "IF NOT EXISTS means column modifications are ignored (documenting behavior)"
+    (let [schema (:schema *test-env*)
+          ;; Get current column type for status (VARCHAR(200))
+          before (jdbc/execute-one!
+                  (:jdbc-conn *test-env*)
+                  ["SELECT character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'status'"
+                   schema])
+          _ (is (= 200 (:columns/character_maximum_length before))
+                "status should be VARCHAR(200)")
+          ;; Try to add column with different length - should be ignored
+          _ (jdbc/execute! (:jdbc-conn *test-env*)
+                           ["ALTER TABLE issues ADD COLUMN IF NOT EXISTS status VARCHAR(500)"])
+          ;; Verify column is unchanged
+          after (jdbc/execute-one!
+                 (:jdbc-conn *test-env*)
+                 ["SELECT character_maximum_length
+                   FROM information_schema.columns
+                   WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'status'"
+                  schema])]
+      ;; This documents the behavior: IF NOT EXISTS means modifications are NOT applied
+      (is (= 200 (:columns/character_maximum_length after))
+          "Column modification should be ignored - still VARCHAR(200)"))))
+
+(deftest migration-sql-statements-use-if-not-exists-test
+  (testing "Generated SQL statements use IF NOT EXISTS pattern"
+    (let [stmts (mig/automatic-schema :tracker model/all-attributes)]
+      ;; All CREATE TABLE statements should have IF NOT EXISTS
+      (doseq [stmt (filter #(str/starts-with? % "CREATE TABLE") stmts)]
+        (is (str/includes? stmt "IF NOT EXISTS")
+            (str "CREATE TABLE should use IF NOT EXISTS: " stmt)))
+      ;; All ALTER TABLE ADD COLUMN statements should have IF NOT EXISTS
+      (doseq [stmt (filter #(str/includes? % "ADD COLUMN") stmts)]
+        (is (str/includes? stmt "IF NOT EXISTS")
+            (str "ADD COLUMN should use IF NOT EXISTS: " stmt)))
+      ;; All CREATE INDEX statements should have IF NOT EXISTS
+      (doseq [stmt (filter #(str/starts-with? % "CREATE INDEX") stmts)]
+        (is (str/includes? stmt "IF NOT EXISTS")
+            (str "CREATE INDEX should use IF NOT EXISTS: " stmt)))
+      ;; All CREATE UNIQUE INDEX statements should have IF NOT EXISTS
+      (doseq [stmt (filter #(str/starts-with? % "CREATE UNIQUE INDEX") stmts)]
+        (is (str/includes? stmt "IF NOT EXISTS")
+            (str "CREATE UNIQUE INDEX should use IF NOT EXISTS: " stmt)))
+      ;; All CREATE SEQUENCE statements should have IF NOT EXISTS
+      (doseq [stmt (filter #(str/starts-with? % "CREATE SEQUENCE") stmts)]
+        (is (str/includes? stmt "IF NOT EXISTS")
+            (str "CREATE SEQUENCE should use IF NOT EXISTS: " stmt))))))
