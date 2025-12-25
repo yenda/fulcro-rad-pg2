@@ -1488,3 +1488,209 @@
     (let [user-id (create! :user/id (fn [_] {:user/username {:after "nomail"}
                                              :user/active? {:after true}}))]
       (is (some? user-id) "NULL email allowed without NOT NULL constraint"))))
+
+;; =============================================================================
+;; TRANSFORMER EDGE CASE TESTS
+;;
+;; Tests for custom form->sql-value and sql->form-value transformers
+;; =============================================================================
+
+(deftest transformer-csv-nil-value-test
+  (testing "CSV transformer handles nil value"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "csv-nil@example.com"}
+                                             :user/username {:after "csvnil"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "CSV Nil Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "CSV Nil Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          ;; Create issue-watcher without notify-on (nil)
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "CSV Nil Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+          watcher-id (create! :issue-watcher/id (fn [_] {:issue-watcher/issue {:after [:issue/id issue-id]}
+                                                         :issue-watcher/user {:after [:user/id user-id]}
+                                                         :issue-watcher/subscribed-at {:after (now)}
+                                                         ;; No notify-on - will be nil
+                                                         }))
+
+          result (run-query-with-ident [:issue-watcher/id watcher-id]
+                                       [:issue-watcher/notify-on])]
+
+      (is (nil? (:issue-watcher/notify-on result))
+          "nil notify-on should be returned as nil"))))
+
+(deftest transformer-csv-empty-vector-test
+  (testing "CSV transformer handles empty vector"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "CSV Empty Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "CSV Empty Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          ;; Create webhook with empty events vector
+          webhook-id (create! :webhook/id (fn [_] {:webhook/name {:after "Empty Events Webhook"}
+                                                   :webhook/url {:after "https://example.com/webhook"}
+                                                   :webhook/secret {:after "secret123"}
+                                                   :webhook/active? {:after true}
+                                                   :webhook/events {:after []}  ;; Empty vector
+                                                   :webhook/project {:after [:project/id project-id]}}))
+
+          result (run-query-with-ident [:webhook/id webhook-id]
+                                       [:webhook/name :webhook/events])]
+
+      ;; Empty vector -> nil in CSV (no tags to store)
+      (is (nil? (:webhook/events result))
+          "Empty vector should be stored as nil and returned as nil"))))
+
+(deftest transformer-csv-single-tag-test
+  (testing "CSV transformer handles single tag"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "CSV Single Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "CSV Single Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          webhook-id (create! :webhook/id (fn [_] {:webhook/name {:after "Single Event Webhook"}
+                                                   :webhook/url {:after "https://example.com/single"}
+                                                   :webhook/secret {:after "secret456"}
+                                                   :webhook/active? {:after true}
+                                                   :webhook/events {:after [:push]}  ;; Single tag
+                                                   :webhook/project {:after [:project/id project-id]}}))
+
+          result (run-query-with-ident [:webhook/id webhook-id]
+                                       [:webhook/name :webhook/events])]
+
+      (is (= [:push] (:webhook/events result))
+          "Single tag should round-trip correctly"))))
+
+(deftest transformer-csv-multiple-tags-test
+  (testing "CSV transformer handles multiple tags"
+    (let [org-id (create! :organization/id (fn [_] {:organization/name {:after "CSV Multi Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "CSV Multi Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          webhook-id (create! :webhook/id (fn [_] {:webhook/name {:after "Multi Event Webhook"}
+                                                   :webhook/url {:after "https://example.com/multi"}
+                                                   :webhook/secret {:after "secret789"}
+                                                   :webhook/active? {:after true}
+                                                   :webhook/events {:after [:push :pull-request :issue :comment]}
+                                                   :webhook/project {:after [:project/id project-id]}}))
+
+          result (run-query-with-ident [:webhook/id webhook-id]
+                                       [:webhook/name :webhook/events])]
+
+      (is (= [:push :pull-request :issue :comment] (:webhook/events result))
+          "Multiple tags should round-trip correctly preserving order"))))
+
+(deftest transformer-json-nil-value-test
+  (testing "JSON transformer handles nil value"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "json-nil@example.com"}
+                                             :user/username {:after "jsonnil"}
+                                             :user/active? {:after true}}))
+          ;; Create API token without permissions (nil)
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Nil Permissions Token"}
+                                                   :api-token/token-hash {:after "hash123"}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   ;; No permissions - will be nil
+                                                   }))
+
+          result (run-query-with-ident [:api-token/id token-id]
+                                       [:api-token/name :api-token/permissions])]
+
+      (is (nil? (:api-token/permissions result))
+          "nil permissions should be returned as nil"))))
+
+(deftest transformer-json-empty-map-test
+  (testing "JSON transformer handles empty map"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "json-empty@example.com"}
+                                             :user/username {:after "jsonempty"}
+                                             :user/active? {:after true}}))
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Empty Permissions Token"}
+                                                   :api-token/token-hash {:after "hash456"}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   :api-token/permissions {:after {}}}))
+
+          result (run-query-with-ident [:api-token/id token-id]
+                                       [:api-token/name :api-token/permissions])]
+
+      (is (= {} (:api-token/permissions result))
+          "Empty map should round-trip correctly"))))
+
+(deftest transformer-json-simple-map-test
+  (testing "JSON transformer handles simple map"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "json-simple@example.com"}
+                                             :user/username {:after "jsonsimple"}
+                                             :user/active? {:after true}}))
+          permissions {:read true :write false :admin false}
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Simple Permissions Token"}
+                                                   :api-token/token-hash {:after "hash789"}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   :api-token/permissions {:after permissions}}))
+
+          result (run-query-with-ident [:api-token/id token-id]
+                                       [:api-token/name :api-token/permissions])]
+
+      (is (= permissions (:api-token/permissions result))
+          "Simple map should round-trip correctly"))))
+
+(deftest transformer-json-nested-structure-test
+  (testing "JSON transformer handles nested structures"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "json-nested@example.com"}
+                                             :user/username {:after "jsonnested"}
+                                             :user/active? {:after true}}))
+          permissions {:scopes {:issues {:read true :write true}
+                                :projects {:read true :write false}}
+                       :rate-limit 1000
+                       :allowed-ips ["192.168.1.1" "10.0.0.0/8"]}
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Nested Permissions Token"}
+                                                   :api-token/token-hash {:after "hashnested"}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   :api-token/permissions {:after permissions}}))
+
+          result (run-query-with-ident [:api-token/id token-id]
+                                       [:api-token/name :api-token/permissions])]
+
+      (is (= permissions (:api-token/permissions result))
+          "Nested structure should round-trip correctly"))))
+
+(deftest transformer-json-vector-value-test
+  (testing "JSON transformer handles vector values"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "json-vector@example.com"}
+                                             :user/username {:after "jsonvector"}
+                                             :user/active? {:after true}}))
+          permissions [:read :write :delete]
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Vector Permissions Token"}
+                                                   :api-token/token-hash {:after "hashvector"}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   :api-token/permissions {:after permissions}}))
+
+          result (run-query-with-ident [:api-token/id token-id]
+                                       [:api-token/name :api-token/permissions])]
+
+      (is (= permissions (:api-token/permissions result))
+          "Vector value should round-trip correctly"))))
+
+(deftest transformer-update-value-test
+  (testing "Transformer works correctly when updating values"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "transform-update@example.com"}
+                                             :user/username {:after "transformupdate"}
+                                             :user/active? {:after true}}))
+          original-perms {:read true}
+          updated-perms {:read true :write true :admin true}
+          token-id (create! :api-token/id (fn [_] {:api-token/name {:after "Update Test Token"}
+                                                   :api-token/token-hash {:after "hashupdate"}
+                                                   :api-token/user {:after [:user/id user-id]}
+                                                   :api-token/permissions {:after original-perms}}))
+
+          ;; Verify original
+          before (run-query-with-ident [:api-token/id token-id]
+                                       [:api-token/permissions])
+          _ (is (= original-perms (:api-token/permissions before)))
+
+          ;; Update permissions
+          _ (save! {[:api-token/id token-id]
+                    {:api-token/permissions {:before original-perms
+                                             :after updated-perms}}})
+
+          ;; Verify updated
+          after (run-query-with-ident [:api-token/id token-id]
+                                      [:api-token/permissions])]
+
+      (is (= updated-perms (:api-token/permissions after))
+          "Updated transformer value should persist correctly"))))
