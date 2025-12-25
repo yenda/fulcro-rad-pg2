@@ -170,8 +170,9 @@
     (fn transform-row [raw-row]
       (reduce
        (fn [acc {:keys [col output-path output-key simple? decoder]}]
-         (if-some [v (get raw-row col)]
-           (let [decoded (if decoder (decoder v) v)]
+         (if (contains? raw-row col)
+           (let [v (get raw-row col)
+                 decoded (if (and v decoder) (decoder v) v)]
              (if simple?
                (assoc acc output-key decoded)
                (assoc-in acc output-path decoded)))

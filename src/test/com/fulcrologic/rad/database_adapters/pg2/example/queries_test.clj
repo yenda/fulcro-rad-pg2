@@ -1103,19 +1103,19 @@
                                                :issue/milestone {:after [:milestone/id milestone-id]}
                                                :issue/created-at {:after (now)}}))
 
-          ;; Verify original ref
-          before (run-query-with-ident [:issue/id issue-id]
-                                       [:issue/title {:issue/milestone [:milestone/name]}])
-          _ (is (= "v1.0" (-> before :issue/milestone :milestone/name)))
+          ;; Verify original ref via direct DB query
+          before-db (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT milestone FROM issues WHERE id = ?" issue-id])
+          _ (is (= milestone-id (first (vals before-db))))
 
           ;; Clear milestone reference
           _ (save! {[:issue/id issue-id]
                     {:issue/milestone {:before [:milestone/id milestone-id]
                                        :after nil}}})
 
-          ;; Verify ref is cleared
-          after (run-query-with-ident [:issue/id issue-id]
-                                      [:issue/title {:issue/milestone [:milestone/name]}])]
+          ;; Verify ref is cleared via direct DB query
+          after-db (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                      ["SELECT milestone FROM issues WHERE id = ?" issue-id])]
 
-      (is (nil? (:issue/milestone after))
+      (is (nil? (first (vals after-db)))
           "Optional to-one ref should be clearable to nil"))))
