@@ -2789,3 +2789,233 @@
           actual-set (set (map :tables/table_name actual-tables))]
       (doseq [table expected-tables]
         (is (contains? actual-set table) (str "Table " table " should exist"))))))
+
+;; =============================================================================
+;; CONSTRAINT VERIFICATION TESTS
+;;
+;; Document and verify constraint behavior - what IS and IS NOT created
+;; =============================================================================
+
+;; --- Constraints that ARE created ---
+
+(deftest constraint-unique-index-on-uuid-identity-test
+  (testing "Unique index created on UUID identity columns"
+    (let [schema (:schema *test-env*)
+          ;; Check for unique index on organizations.id
+          idx (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                 ["SELECT i.indexname, i.indexdef
+                                   FROM pg_indexes i
+                                   WHERE i.schemaname = ?
+                                     AND i.tablename = 'organizations'
+                                     AND i.indexname = 'organizations_id_idx'"
+                                  schema])]
+      (is (some? idx) "organizations_id_idx should exist")
+      ;; The index definition should show it's on the id column
+      (when idx
+        (is (re-find #"id" (:pg_indexes/indexdef idx)) "Index should be on id column")))))
+
+(deftest constraint-unique-index-on-long-identity-test
+  (testing "Unique index created on long identity columns"
+    (let [schema (:schema *test-env*)
+          ;; Check for unique index on issues.id
+          idx (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                 ["SELECT i.indexname, i.indexdef
+                                   FROM pg_indexes i
+                                   WHERE i.schemaname = ?
+                                     AND i.tablename = 'issues'
+                                     AND i.indexname = 'issues_id_idx'"
+                                  schema])]
+      (is (some? idx) "issues_id_idx should exist")
+      (when idx
+        (is (re-find #"id" (:pg_indexes/indexdef idx)) "Index should be on id column")))))
+
+(deftest constraint-primary-key-not-created-test
+  (testing "PRIMARY KEY constraint is NOT created (only index)"
+    (let [schema (:schema *test-env*)
+          ;; Check that there's no PRIMARY KEY constraint on organizations
+          pk-constraint (jdbc/execute-one!
+                         (:jdbc-conn *test-env*)
+                         ["SELECT tc.constraint_name, tc.constraint_type
+                           FROM information_schema.table_constraints tc
+                           WHERE tc.table_schema = ?
+                             AND tc.table_name = 'organizations'
+                             AND tc.constraint_type = 'PRIMARY KEY'"
+                          schema])]
+      ;; RAD pg2 creates indexes but not PRIMARY KEY constraints
+      (is (nil? pk-constraint) "PRIMARY KEY constraint should NOT be created"))))
+
+(deftest constraint-fk-deferrable-test
+  (testing "FK constraints are created as DEFERRABLE INITIALLY DEFERRED"
+    (let [schema (:schema *test-env*)
+          ;; Query pg_constraint for deferrability info
+          fk-info (jdbc/execute-one!
+                   (:jdbc-conn *test-env*)
+                   ["SELECT c.conname, c.condeferrable, c.condeferred
+                     FROM pg_constraint c
+                     JOIN pg_namespace n ON c.connamespace = n.oid
+                     JOIN pg_class t ON c.conrelid = t.oid
+                     WHERE n.nspname = ?
+                       AND t.relname = 'issues'
+                       AND c.contype = 'f'
+                     LIMIT 1"
+                    schema])]
+      (is (some? fk-info) "FK constraint should exist")
+      (when fk-info
+        (is (true? (:pg_constraint/condeferrable fk-info)) "FK should be deferrable")
+        (is (true? (:pg_constraint/condeferred fk-info)) "FK should be initially deferred")))))
+
+;; --- Constraints that are NOT created ---
+
+(deftest constraint-not-null-not-created-test
+  (testing "NOT NULL constraints are NOT created by schema generator"
+    (let [schema (:schema *test-env*)
+          ;; Check that required columns still allow NULL
+          ;; user/email has ::attr/required? true but should still be nullable in DB
+          email-col (jdbc/execute-one!
+                     (:jdbc-conn *test-env*)
+                     ["SELECT column_name, is_nullable
+                       FROM information_schema.columns
+                       WHERE table_schema = ? AND table_name = 'users' AND column_name = 'email'"
+                      schema])
+          ;; issue/title has ::attr/required? true
+          title-col (jdbc/execute-one!
+                     (:jdbc-conn *test-env*)
+                     ["SELECT column_name, is_nullable
+                       FROM information_schema.columns
+                       WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'title'"
+                      schema])]
+      ;; ::attr/required? is form-level validation only, not DB constraint
+      (is (= "YES" (:columns/is_nullable email-col))
+          "user/email should be nullable (required? is form-level only)")
+      (is (= "YES" (:columns/is_nullable title-col))
+          "issue/title should be nullable (required? is form-level only)"))))
+
+(deftest constraint-unique-not-created-on-non-id-test
+  (testing "UNIQUE constraints are NOT created on non-id columns"
+    (let [schema (:schema *test-env*)
+          ;; Check that there's no UNIQUE constraint on user/email
+          ;; (even though emails should be unique in practice)
+          unique-constraints (jdbc/execute!
+                              (:jdbc-conn *test-env*)
+                              ["SELECT tc.constraint_name, kcu.column_name
+                                FROM information_schema.table_constraints tc
+                                JOIN information_schema.key_column_usage kcu
+                                  ON tc.constraint_name = kcu.constraint_name
+                                  AND tc.table_schema = kcu.table_schema
+                                WHERE tc.table_schema = ?
+                                  AND tc.table_name = 'users'
+                                  AND tc.constraint_type = 'UNIQUE'"
+                               schema])
+          unique-columns (set (map :key_column_usage/column_name unique-constraints))]
+      ;; There should be no UNIQUE constraints on users table
+      (is (not (contains? unique-columns "email"))
+          "No UNIQUE constraint on email (must be added manually if needed)")
+      (is (not (contains? unique-columns "username"))
+          "No UNIQUE constraint on username (must be added manually if needed)"))))
+
+(deftest constraint-check-not-created-test
+  (testing "CHECK constraints are NOT created by schema generator"
+    (let [schema (:schema *test-env*)
+          ;; Verify no CHECK constraints exist on any table
+          check-constraints (jdbc/execute!
+                             (:jdbc-conn *test-env*)
+                             ["SELECT tc.table_name, tc.constraint_name
+                               FROM information_schema.table_constraints tc
+                               WHERE tc.table_schema = ?
+                                 AND tc.constraint_type = 'CHECK'"
+                              schema])]
+      ;; RAD pg2 doesn't generate CHECK constraints
+      (is (empty? check-constraints)
+          "No CHECK constraints should be created by schema generator"))))
+
+;; --- VARCHAR max-length verification ---
+
+(deftest constraint-varchar-default-length-test
+  (testing "VARCHAR columns default to 200 characters for keywords/enums"
+    (let [schema (:schema *test-env*)
+          ;; issue/status is a keyword without explicit max-length
+          status-col (jdbc/execute-one!
+                      (:jdbc-conn *test-env*)
+                      ["SELECT column_name, character_maximum_length
+                        FROM information_schema.columns
+                        WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'status'"
+                       schema])
+          ;; issue/type is also a keyword
+          type-col (jdbc/execute-one!
+                    (:jdbc-conn *test-env*)
+                    ["SELECT column_name, character_maximum_length
+                      FROM information_schema.columns
+                      WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'issue_type'"
+                     schema])]
+      (is (= 200 (:columns/character_maximum_length status-col))
+          "Keyword columns should default to VARCHAR(200)")
+      (is (= 200 (:columns/character_maximum_length type-col))
+          "Enum columns should default to VARCHAR(200)"))))
+
+(deftest constraint-varchar-custom-length-test
+  (testing "::pg2/max-length produces correct VARCHAR(n)"
+    (let [schema (:schema *test-env*)
+          ;; label/name has ::pg2/max-length 50
+          label-name (jdbc/execute-one!
+                      (:jdbc-conn *test-env*)
+                      ["SELECT column_name, character_maximum_length
+                        FROM information_schema.columns
+                        WHERE table_schema = ? AND table_name = 'labels' AND column_name = 'name'"
+                       schema])
+          ;; project/key has ::pg2/max-length 10
+          project-key (jdbc/execute-one!
+                       (:jdbc-conn *test-env*)
+                       ["SELECT column_name, character_maximum_length
+                         FROM information_schema.columns
+                         WHERE table_schema = ? AND table_name = 'projects' AND column_name = 'project_key'"
+                        schema])]
+      (is (= 50 (:columns/character_maximum_length label-name))
+          "label/name should be VARCHAR(50)")
+      (is (= 10 (:columns/character_maximum_length project-key))
+          "project/key should be VARCHAR(10)"))))
+
+(deftest constraint-varchar-large-max-length-test
+  (testing "Large max-length produces correct VARCHAR(n)"
+    (let [schema (:schema *test-env*)
+          ;; comment/body has ::pg2/max-length 10000
+          body-col (jdbc/execute-one!
+                    (:jdbc-conn *test-env*)
+                    ["SELECT column_name, data_type, character_maximum_length
+                      FROM information_schema.columns
+                      WHERE table_schema = ? AND table_name = 'comments' AND column_name = 'body'"
+                     schema])
+          ;; issue/description has ::pg2/max-length 10000
+          desc-col (jdbc/execute-one!
+                    (:jdbc-conn *test-env*)
+                    ["SELECT column_name, data_type, character_maximum_length
+                      FROM information_schema.columns
+                      WHERE table_schema = ? AND table_name = 'issues' AND column_name = 'description'"
+                     schema])]
+      ;; RAD pg2 uses VARCHAR(n) not TEXT - even for large values
+      (is (= "character varying" (:columns/data_type body-col))
+          "comment/body should be VARCHAR type")
+      (is (= 10000 (:columns/character_maximum_length body-col))
+          "comment/body should be VARCHAR(10000)")
+      (is (= "character varying" (:columns/data_type desc-col))
+          "issue/description should be VARCHAR type")
+      (is (= 10000 (:columns/character_maximum_length desc-col))
+          "issue/description should be VARCHAR(10000)"))))
+
+;; --- Index verification ---
+
+(deftest constraint-index-on-fk-columns-test
+  (testing "Indexes are created on all FK reference columns"
+    (let [schema (:schema *test-env*)
+          ;; Get all indexes on the issues table
+          issue-indexes (jdbc/execute!
+                         (:jdbc-conn *test-env*)
+                         ["SELECT indexname, indexdef
+                           FROM pg_indexes
+                           WHERE schemaname = ? AND tablename = 'issues'"
+                          schema])
+          index-names (set (map :pg_indexes/indexname issue-indexes))]
+      ;; Should have indexes for FK columns
+      (is (contains? index-names "project_idx")
+          "Index on issues.project should exist")
+      (is (contains? index-names "reporter_id_idx")
+          "Index on issues.reporter_id should exist"))))

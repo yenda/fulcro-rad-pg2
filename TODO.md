@@ -178,14 +178,29 @@ Note: `delete-orphan?` already tested extensively in `delete_orphan_edge_cases_t
 - `schema-multiple-fk-constraints-test` - Multiple FK constraints on tables with multiple refs
 - `schema-all-expected-tables-exist-test` - All expected tables from model are created
 
-### 13. Constraint verification tests
+### 13. ~~Constraint verification tests~~ DONE
 
-**Priority:** Low
+**Status:** DONE
+**Tests added:**
 
-Document and test constraint behavior:
-- Verify which constraints ARE created (FK, unique index on id)
-- Verify which constraints are NOT created (NOT NULL, UNIQUE on non-id)
-- Test `::pg2/max-length` produces correct `VARCHAR(n)`
+Constraints that ARE created:
+- `constraint-unique-index-on-uuid-identity-test` - Unique index on UUID identity columns
+- `constraint-unique-index-on-long-identity-test` - Unique index on long identity columns
+- `constraint-primary-key-not-created-test` - PRIMARY KEY constraint NOT created (only index)
+- `constraint-fk-deferrable-test` - FK constraints are DEFERRABLE INITIALLY DEFERRED
+
+Constraints that are NOT created:
+- `constraint-not-null-not-created-test` - NOT NULL not created (::attr/required? is form-level only)
+- `constraint-unique-not-created-on-non-id-test` - UNIQUE not created on non-id columns
+- `constraint-check-not-created-test` - CHECK constraints not created
+
+VARCHAR max-length verification:
+- `constraint-varchar-default-length-test` - Keywords/enums default to VARCHAR(200)
+- `constraint-varchar-custom-length-test` - ::pg2/max-length produces correct VARCHAR(n)
+- `constraint-varchar-large-max-length-test` - Large max-length (10000) works correctly
+
+Index verification:
+- `constraint-index-on-fk-columns-test` - Indexes created on FK reference columns
 
 ### 14. Migration diff testing
 
