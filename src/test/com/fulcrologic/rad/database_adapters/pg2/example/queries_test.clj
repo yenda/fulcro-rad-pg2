@@ -1878,3 +1878,349 @@
 
       (is (nil? old-result) "Old user should be deleted")
       (is (= "newuser" (:user/username new-result)) "New user should be created"))))
+
+;; =============================================================================
+;; SELF-REFERENTIAL RELATIONSHIP TESTS
+;;
+;; Tests for hierarchical/recursive relationships (issue/parent ↔ issue/children)
+;; =============================================================================
+
+(deftest self-ref-query-parent-from-child-test
+  (testing "Query parent issue from child issue"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "self-ref@example.com"}
+                                             :user/username {:after "selfref"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Self Ref Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Self Ref Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create parent issue
+          parent-id (create! :issue/id (fn [_] {:issue/title {:after "Parent Issue"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/epic}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
+
+          ;; Create child issue with parent reference
+          child-id (create! :issue/id (fn [_] {:issue/title {:after "Child Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/parent {:after [:issue/id parent-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Query child with parent
+          result (run-query-with-ident [:issue/id child-id]
+                                       [:issue/title
+                                        {:issue/parent [:issue/id :issue/title :issue/type]}])]
+
+      (is (= "Child Issue" (:issue/title result)))
+      (is (= parent-id (-> result :issue/parent :issue/id)))
+      (is (= "Parent Issue" (-> result :issue/parent :issue/title)))
+      (is (= :issue.type/epic (-> result :issue/parent :issue/type))))))
+
+(deftest self-ref-query-children-from-parent-test
+  (testing "Query children issues from parent issue"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "self-ref-children@example.com"}
+                                             :user/username {:after "selfrefchildren"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Self Ref Children Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Self Ref Children Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create parent issue
+          parent-id (create! :issue/id (fn [_] {:issue/title {:after "Epic Issue"}
+                                                :issue/status {:after :issue.status/open}
+                                                :issue/type {:after :issue.type/epic}
+                                                :issue/project {:after [:project/id project-id]}
+                                                :issue/reporter {:after [:user/id user-id]}
+                                                :issue/created-at {:after (now)}}))
+
+          ;; Create 3 child issues with different priority orders
+          _ (create! :issue/id (fn [_] {:issue/title {:after "Child C"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 3}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id parent-id]}
+                                        :issue/created-at {:after (now)}}))
+          _ (create! :issue/id (fn [_] {:issue/title {:after "Child A"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 1}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id parent-id]}
+                                        :issue/created-at {:after (now)}}))
+          _ (create! :issue/id (fn [_] {:issue/title {:after "Child B"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 2}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id parent-id]}
+                                        :issue/created-at {:after (now)}}))
+
+          ;; Query parent with children
+          result (run-query-with-ident [:issue/id parent-id]
+                                       [:issue/title
+                                        {:issue/children [:issue/title :issue/priority-order]}])]
+
+      (is (= "Epic Issue" (:issue/title result)))
+      (is (= 3 (count (:issue/children result))))
+      ;; Children should be ordered by priority-order
+      (is (= ["Child A" "Child B" "Child C"]
+             (mapv :issue/title (:issue/children result)))))))
+
+(deftest self-ref-multiple-levels-test
+  (testing "Query multiple levels deep (grandparent → parent → child)"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "multi-level@example.com"}
+                                             :user/username {:after "multilevel"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Multi Level Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Multi Level Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create 3-level hierarchy: Epic → Story → Task
+          epic-id (create! :issue/id (fn [_] {:issue/title {:after "Epic"}
+                                              :issue/status {:after :issue.status/open}
+                                              :issue/type {:after :issue.type/epic}
+                                              :issue/project {:after [:project/id project-id]}
+                                              :issue/reporter {:after [:user/id user-id]}
+                                              :issue/created-at {:after (now)}}))
+          story-id (create! :issue/id (fn [_] {:issue/title {:after "Story"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/feature}
+                                               :issue/priority-order {:after 1}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/parent {:after [:issue/id epic-id]}
+                                               :issue/created-at {:after (now)}}))
+          task-id (create! :issue/id (fn [_] {:issue/title {:after "Task"}
+                                              :issue/status {:after :issue.status/in-progress}
+                                              :issue/type {:after :issue.type/task}
+                                              :issue/priority-order {:after 1}
+                                              :issue/project {:after [:project/id project-id]}
+                                              :issue/reporter {:after [:user/id user-id]}
+                                              :issue/parent {:after [:issue/id story-id]}
+                                              :issue/created-at {:after (now)}}))
+
+          ;; Query from top (Epic) down to Task
+          top-down (run-query-with-ident
+                    [:issue/id epic-id]
+                    [:issue/title
+                     {:issue/children
+                      [:issue/title
+                       {:issue/children
+                        [:issue/title :issue/status]}]}])
+
+          ;; Query from bottom (Task) up to Epic
+          bottom-up (run-query-with-ident
+                     [:issue/id task-id]
+                     [:issue/title
+                      {:issue/parent
+                       [:issue/title
+                        {:issue/parent
+                         [:issue/title :issue/type]}]}])]
+
+      ;; Verify top-down traversal
+      (is (= "Epic" (:issue/title top-down)))
+      (is (= "Story" (-> top-down :issue/children first :issue/title)))
+      (is (= "Task" (-> top-down :issue/children first :issue/children first :issue/title)))
+      (is (= :issue.status/in-progress
+             (-> top-down :issue/children first :issue/children first :issue/status)))
+
+      ;; Verify bottom-up traversal
+      (is (= "Task" (:issue/title bottom-up)))
+      (is (= "Story" (-> bottom-up :issue/parent :issue/title)))
+      (is (= "Epic" (-> bottom-up :issue/parent :issue/parent :issue/title)))
+      (is (= :issue.type/epic (-> bottom-up :issue/parent :issue/parent :issue/type))))))
+
+(deftest self-ref-no-parent-test
+  (testing "Issue without parent has NULL parent_id in database"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "no-parent@example.com"}
+                                             :user/username {:after "noparent"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "No Parent Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "No Parent Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create standalone issue (no parent)
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Standalone Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/bug}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Verify via Pathom that title is correct
+          result (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title])
+
+          ;; Verify via direct DB query that parent_id is NULL
+          db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                       ["SELECT parent_id FROM issues WHERE id = ?" issue-id])]
+
+      (is (= "Standalone Issue" (:issue/title result)))
+      (is (nil? (:parent_id db-result)) "parent_id should be NULL in database"))))
+
+(deftest self-ref-no-children-test
+  (testing "Issue without children returns empty vector"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "no-children@example.com"}
+                                             :user/username {:after "nochildren"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "No Children Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "No Children Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create leaf issue (no children)
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Leaf Issue"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Query with children - should be empty
+          result (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title
+                                        {:issue/children [:issue/title]}])]
+
+      (is (= "Leaf Issue" (:issue/title result)))
+      (is (= [] (:issue/children result))))))
+
+(deftest self-ref-reparent-issue-test
+  (testing "Reparent issue to different parent"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "reparent-self@example.com"}
+                                             :user/username {:after "reparentself"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Reparent Self Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Reparent Self Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create two parent issues
+          parent-a-id (create! :issue/id (fn [_] {:issue/title {:after "Parent A"}
+                                                  :issue/status {:after :issue.status/open}
+                                                  :issue/type {:after :issue.type/epic}
+                                                  :issue/project {:after [:project/id project-id]}
+                                                  :issue/reporter {:after [:user/id user-id]}
+                                                  :issue/created-at {:after (now)}}))
+          parent-b-id (create! :issue/id (fn [_] {:issue/title {:after "Parent B"}
+                                                  :issue/status {:after :issue.status/open}
+                                                  :issue/type {:after :issue.type/epic}
+                                                  :issue/project {:after [:project/id project-id]}
+                                                  :issue/reporter {:after [:user/id user-id]}
+                                                  :issue/created-at {:after (now)}}))
+
+          ;; Create child under Parent A
+          child-id (create! :issue/id (fn [_] {:issue/title {:after "Child"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/priority-order {:after 1}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/parent {:after [:issue/id parent-a-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Verify initial parent
+          before (run-query-with-ident [:issue/id child-id]
+                                       [:issue/title {:issue/parent [:issue/title]}])
+          _ (is (= "Parent A" (-> before :issue/parent :issue/title)))
+
+          ;; Reparent to Parent B
+          _ (save! {[:issue/id child-id]
+                    {:issue/parent {:before [:issue/id parent-a-id]
+                                    :after [:issue/id parent-b-id]}}})
+
+          ;; Verify new parent
+          after (run-query-with-ident [:issue/id child-id]
+                                      [:issue/title {:issue/parent [:issue/title]}])
+
+          ;; Verify Parent A has no children, Parent B has child
+          parent-a-result (run-query-with-ident [:issue/id parent-a-id]
+                                                [:issue/title {:issue/children [:issue/title]}])
+          parent-b-result (run-query-with-ident [:issue/id parent-b-id]
+                                                [:issue/title {:issue/children [:issue/title]}])]
+
+      (is (= "Parent B" (-> after :issue/parent :issue/title)))
+      (is (= [] (:issue/children parent-a-result)) "Parent A should have no children")
+      (is (= ["Child"] (mapv :issue/title (:issue/children parent-b-result)))
+          "Parent B should have the child"))))
+
+(deftest self-ref-batch-query-test
+  (testing "Batch query of multiple issues with parent/children"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "batch-self@example.com"}
+                                             :user/username {:after "batchself"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Batch Self Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Batch Self Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Create 2 epics with 2 children each
+          epic1-id (create! :issue/id (fn [_] {:issue/title {:after "Epic 1"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/epic}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+          epic2-id (create! :issue/id (fn [_] {:issue/title {:after "Epic 2"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/epic}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Children for Epic 1
+          _ (create! :issue/id (fn [_] {:issue/title {:after "E1-Task1"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 1}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id epic1-id]}
+                                        :issue/created-at {:after (now)}}))
+          _ (create! :issue/id (fn [_] {:issue/title {:after "E1-Task2"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 2}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id epic1-id]}
+                                        :issue/created-at {:after (now)}}))
+
+          ;; Children for Epic 2
+          _ (create! :issue/id (fn [_] {:issue/title {:after "E2-Task1"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 1}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id epic2-id]}
+                                        :issue/created-at {:after (now)}}))
+          _ (create! :issue/id (fn [_] {:issue/title {:after "E2-Task2"}
+                                        :issue/status {:after :issue.status/open}
+                                        :issue/type {:after :issue.type/task}
+                                        :issue/priority-order {:after 2}
+                                        :issue/project {:after [:project/id project-id]}
+                                        :issue/reporter {:after [:user/id user-id]}
+                                        :issue/parent {:after [:issue/id epic2-id]}
+                                        :issue/created-at {:after (now)}}))
+
+          ;; Batch query both epics
+          results (run-query [{[:issue/id epic1-id] [:issue/title {:issue/children [:issue/title]}]}
+                              {[:issue/id epic2-id] [:issue/title {:issue/children [:issue/title]}]}])
+
+          epic1-result (get results [:issue/id epic1-id])
+          epic2-result (get results [:issue/id epic2-id])]
+
+      (is (= "Epic 1" (:issue/title epic1-result)))
+      (is (= ["E1-Task1" "E1-Task2"] (mapv :issue/title (:issue/children epic1-result))))
+
+      (is (= "Epic 2" (:issue/title epic2-result)))
+      (is (= ["E2-Task1" "E2-Task2"] (mapv :issue/title (:issue/children epic2-result)))))
+
+    ;; Children should be independently associated with correct parent
+    ))
