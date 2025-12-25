@@ -1002,3 +1002,120 @@
       (is (= "partialtest" (:user/username after)) "Username should remain unchanged")
       (is (= "New Display Name" (:user/display-name after)) "Display name should be updated")
       (is (= true (:user/active? after)) "Active status should remain unchanged"))))
+
+;; =============================================================================
+;; NULL/NIL HANDLING TESTS
+;;
+;; Tests for setting optional attributes to nil and clearing refs
+;; =============================================================================
+
+(deftest set-optional-string-to-nil-test
+  (testing "Setting optional string attribute to nil"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "nil-test@example.com"}
+                                             :user/username {:after "niltest"}
+                                             :user/display-name {:after "Has Display Name"}
+                                             :user/active? {:after true}}))
+
+          ;; Verify original value
+          before (run-query-with-ident [:user/id user-id]
+                                       [:user/display-name])
+          _ (is (= "Has Display Name" (:user/display-name before)))
+
+          ;; Set display-name to nil
+          _ (save! {[:user/id user-id]
+                    {:user/display-name {:before "Has Display Name"
+                                         :after nil}}})
+
+          ;; Verify nil value
+          after (run-query-with-ident [:user/id user-id]
+                                      [:user/display-name])]
+
+      (is (nil? (:user/display-name after))
+          "Optional string should be settable to nil"))))
+
+(deftest set-optional-instant-to-nil-test
+  (testing "Setting optional instant attribute to nil"
+    (let [original-time (now)
+          user-id (create! :user/id (fn [_] {:user/email {:after "instant-nil@example.com"}
+                                             :user/username {:after "instantnil"}
+                                             :user/last-login-at {:after original-time}
+                                             :user/active? {:after true}}))
+
+          ;; Verify original value
+          before (run-query-with-ident [:user/id user-id]
+                                       [:user/last-login-at])
+          _ (is (instance? Instant (:user/last-login-at before)))
+
+          ;; Set last-login-at to nil
+          _ (save! {[:user/id user-id]
+                    {:user/last-login-at {:before original-time
+                                          :after nil}}})
+
+          ;; Verify nil value
+          after (run-query-with-ident [:user/id user-id]
+                                      [:user/last-login-at])]
+
+      (is (nil? (:user/last-login-at after))
+          "Optional instant should be settable to nil"))))
+
+(deftest set-optional-decimal-to-nil-test
+  (testing "Setting optional decimal attribute to nil"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "decimal-nil@example.com"}
+                                             :user/username {:after "decimalnil"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Decimal Nil Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Decimal Nil Project"}
+                                                   :project/budget {:after 50000.00M}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+
+          ;; Verify original value
+          before (run-query-with-ident [:project/id project-id]
+                                       [:project/budget])
+          _ (is (= 50000.00M (:project/budget before)))
+
+          ;; Set budget to nil
+          _ (save! {[:project/id project-id]
+                    {:project/budget {:before 50000.00M
+                                      :after nil}}})
+
+          ;; Verify nil value
+          after (run-query-with-ident [:project/id project-id]
+                                      [:project/budget])]
+
+      (is (nil? (:project/budget after))
+          "Optional decimal should be settable to nil"))))
+
+(deftest clear-optional-to-one-ref-test
+  (testing "Clearing optional to-one reference"
+    (let [user-id (create! :user/id (fn [_] {:user/email {:after "clear-ref@example.com"}
+                                             :user/username {:after "clearref"}
+                                             :user/active? {:after true}}))
+          org-id (create! :organization/id (fn [_] {:organization/name {:after "Clear Ref Org"}}))
+          project-id (create! :project/id (fn [_] {:project/name {:after "Clear Ref Project"}
+                                                   :project/organization {:after [:organization/id org-id]}}))
+          milestone-id (create! :milestone/id (fn [_] {:milestone/name {:after "v1.0"}
+                                                       :milestone/project {:after [:project/id project-id]}}))
+          issue-id (create! :issue/id (fn [_] {:issue/title {:after "Has Milestone"}
+                                               :issue/status {:after :issue.status/open}
+                                               :issue/type {:after :issue.type/task}
+                                               :issue/project {:after [:project/id project-id]}
+                                               :issue/reporter {:after [:user/id user-id]}
+                                               :issue/milestone {:after [:milestone/id milestone-id]}
+                                               :issue/created-at {:after (now)}}))
+
+          ;; Verify original ref
+          before (run-query-with-ident [:issue/id issue-id]
+                                       [:issue/title {:issue/milestone [:milestone/name]}])
+          _ (is (= "v1.0" (-> before :issue/milestone :milestone/name)))
+
+          ;; Clear milestone reference
+          _ (save! {[:issue/id issue-id]
+                    {:issue/milestone {:before [:milestone/id milestone-id]
+                                       :after nil}}})
+
+          ;; Verify ref is cleared
+          after (run-query-with-ident [:issue/id issue-id]
+                                      [:issue/title {:issue/milestone [:milestone/name]}])]
+
+      (is (nil? (:issue/milestone after))
+          "Optional to-one ref should be clearable to nil"))))
