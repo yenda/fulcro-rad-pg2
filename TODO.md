@@ -130,15 +130,17 @@ Update operations:
 
 Note: `delete-orphan?` already tested extensively in `delete_orphan_edge_cases_test.clj`
 
-### 10. Self-referential relationships
+### 10. ~~Self-referential relationships~~ DONE
 
-**Priority:** Medium
-
-Test hierarchical/recursive relationships:
-- Parent/child issues (`issue/parent` → `issue/children`)
-- Query parent from child
-- Query children from parent
-- Multiple levels deep
+**Status:** DONE
+**Tests added:**
+- `self-ref-query-parent-from-child-test` - Query parent issue from child via `:issue/parent`
+- `self-ref-query-children-from-parent-test` - Query children with `::pg2/order-by` ordering
+- `self-ref-multiple-levels-test` - 3-level hierarchy (Epic → Story → Task), top-down and bottom-up
+- `self-ref-no-parent-test` - Standalone issue has NULL parent_id
+- `self-ref-no-children-test` - Leaf issue returns empty `[]` for children
+- `self-ref-reparent-issue-test` - Move child to different parent
+- `self-ref-batch-query-test` - Batch query multiple parents with independent children
 
 ### 11. Many-to-many through join table
 
