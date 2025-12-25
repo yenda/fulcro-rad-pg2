@@ -147,21 +147,6 @@ Test many-to-many patterns:
 
 ---
 
-## Performance Tests
-
-### 12. Write benchmarks
-
-**Priority:** Low
-
-The `perf/` directory contains read benchmarks. Add:
-- Single insert benchmark
-- Batch insert benchmark (10, 50, 100 entities)
-- Update benchmarks
-- Delete benchmarks (with cascade)
-- Mixed workload benchmarks
-
----
-
 ## Documentation
 
 ### 13. Update documentation
