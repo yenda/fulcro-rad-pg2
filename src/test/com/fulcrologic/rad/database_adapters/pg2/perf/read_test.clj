@@ -1,4 +1,4 @@
-(ns com.fulcrologic.rad.database-adapters.pg2.perf.read-test
+(ns ^:integration com.fulcrologic.rad.database-adapters.pg2.perf.read-test
   "Performance benchmarks for Pathom3 resolver reads.
 
    Benchmarks range from simple ID lookups to complex multi-level

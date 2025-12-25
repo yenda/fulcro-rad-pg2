@@ -1,4 +1,4 @@
-(ns com.fulcrologic.rad.database-adapters.pg2.perf.write-test
+(ns ^:integration com.fulcrologic.rad.database-adapters.pg2.perf.write-test
   "Performance benchmarks for save-form! writes.
 
    Benchmarks range from simple single-entity inserts to complex

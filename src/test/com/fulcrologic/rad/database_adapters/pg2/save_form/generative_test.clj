@@ -1,4 +1,4 @@
-(ns com.fulcrologic.rad.database-adapters.pg2.save-form.generative-test
+(ns ^:integration com.fulcrologic.rad.database-adapters.pg2.save-form.generative-test
   "Generative (property-based) tests for save-form!
 
    Uses test.check to generate random deltas and verify properties hold."
