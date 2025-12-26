@@ -251,13 +251,130 @@ Documentation added:
 
 ---
 
+## Authorization Integration
+
+### 16. Authorization Input Dependencies
+
+**Priority:** High
+**Impact:** Enable ReBAC authorization without N+1 permission checks
+
+Integrate with axiom's authorization system using Pathom's input/output dependencies as the authorization mechanism. Permission attributes become resolver inputs - if missing, Pathom resolves them; if provided by parent (entry point), no extra query needed.
+
+**The Pattern:**
+
+```clojure
+;; pg2 generates ID resolver that REQUIRES permission as input
+(pco/defresolver course-data
+  [env {:course/keys [id ax-can-read?]}]
+  {::pco/input [:course/id :course/ax-can-read?]  ;; <-- gate
+   ::pco/output [:course/title :course/description ...]}
+  (when ax-can-read?
+    (db/fetch-course id)))
+
+;; Axiom generates the permission resolver (separate concern)
+(pco/defresolver course-ax-can-read
+  [{:keys [current-user]} {:course/keys [id]}]
+  {::pco/input [:course/id]
+   ::pco/output [:course/ax-can-read?]
+   ::pco/batch? true}
+  {:course/ax-can-read? (check-permission ...)})
+
+;; Entry points pre-authorize by including permission in output
+(pco/defresolver my-courses
+  [{:keys [current-user]} _]
+  {::pco/output [{:my-courses [:course/id :course/ax-can-read?]}]}
+  {:my-courses
+   (->> (db/query "SELECT id FROM courses WHERE ..." user-id)
+        (mapv #(hash-map :course/id % :course/ax-can-read? true)))})
+```
+
+**Flow - Entry Point (no extra queries):**
+```
+[{:my-courses [:course/title]}]
+
+1. my-courses → [{:course/id 1 :course/ax-can-read? true} ...]
+2. course-data needs [:course/id :course/ax-can-read?]
+   → Already have both from parent!
+3. Returns data, no permission resolver called
+```
+
+**Flow - Direct Access (permission resolved):**
+```
+[{[:course/id 999] [:course/title]}]
+
+1. course-data needs [:course/id :course/ax-can-read?]
+2. Have id, missing ax-can-read?
+3. Pathom calls course-ax-can-read resolver (batched)
+4. course-data runs with result
+5. If false → returns nil
+```
+
+**Flow - Inheritance (nested access):**
+```clojure
+;; Lesson inherits permission from course
+(pco/defresolver lesson-ax-can-read
+  [env {:lesson/keys [course-id]}]
+  {::pco/input [:lesson/course-id]
+   ::pco/output [:lesson/ax-can-read?]}
+  ;; Pathom resolves course's permission, we inherit it
+  (let [{:course/keys [ax-can-read?]}
+        (p.eql/process env {:course/id course-id} [:course/ax-can-read?])]
+    {:lesson/ax-can-read? ax-can-read?}))
+```
+
+**pg2 Changes Required:**
+
+1. **New attribute option:** `::pg2/authz-input`
+   ```clojure
+   (defattr course-id :course/id :uuid
+     {::attr/identity? true
+      ::pg2/table "courses"
+      ::pg2/authz-input :course/ax-can-read?})
+   ```
+
+2. **Global configuration option:**
+   ```clojure
+   {::pg2/authz-input-pattern :ax-can-read?}  ;; Auto-generates :<entity>/ax-can-read?
+   ```
+
+3. **Changes to `read.clj`:**
+   - `build-id-resolver-config`: Add authz-input to `::pco/input`
+   - `id-resolver`: Filter by authz-input before querying (only fetch authorized)
+   - `build-to-many-resolver-config`: Same pattern for relationship resolvers
+
+**Implementation steps:**
+1. Add `::pg2/authz-input` attribute option spec
+2. Add `::pg2/authz-input-pattern` global config option
+3. Modify `build-id-resolver-config` to include authz input in `::pco/input`
+4. Modify `id-resolver` to check authz input, filter unauthorized before query
+5. Apply same pattern to to-many resolvers (check parent's permission)
+6. Add tests for all three flows (entry point, direct access, inheritance)
+7. Document the pattern and integration with axiom
+
+**What pg2 provides vs Axiom:**
+
+| pg2 | Axiom |
+|-----|-------|
+| Adds authz input to resolver requirements | Generates permission resolvers |
+| Filters unauthorized before fetching | Defines permission rules |
+| Knows nothing about permission logic | Handles inheritance logic |
+
+**Why this approach:**
+- No manual cache management - Pathom's dependency resolution IS the cache
+- Batching works automatically via `::pco/batch?`
+- Entry points optimize by providing permission in output
+- Standard Pathom tracing for debugging
+- Clean separation: pg2 gates access, axiom computes permissions
+
+---
+
 ## Future Improvements (inspired by walkable)
 
 Analysis of [walkable](https://github.com/walkable-server/walkable) revealed several architectural patterns that could improve pg2's performance and developer experience.
 
-### 16. Floor-Plan Pre-Compilation
+### 17. Floor-Plan Pre-Compilation
 
-**Priority:** High
+**Priority:** Medium
 **Impact:** Performance improvement, better error messages at startup
 
 Currently, pg2 builds SQL queries and compiles resolvers dynamically during `generate-resolvers`. Walkable uses a "floor-plan" architecture that compiles the attribute registry into optimized query templates once at startup.
@@ -307,7 +424,7 @@ Currently, pg2 builds SQL queries and compiles resolvers dynamically during `gen
 
 ---
 
-### 17. Join-Path Specification for Relationships
+### 18. Join-Path Specification for Relationships
 
 **Priority:** Medium
 **Impact:** Cleaner M:M handling, more flexible relationship modeling
@@ -367,10 +484,12 @@ ORDER BY l.name
 
 ---
 
-### 18. Formula-Based Pseudo-Columns
+### 19. Formula-Based Pseudo-Columns
 
-**Priority:** Medium
+**Priority:** Low
 **Impact:** Computed fields evaluated in SQL, not Clojure
+
+> **Note:** Originally considered for authorization membership checks, but #16 (Authorization Input Dependencies) provides a cleaner pattern using Pathom's resolver dependencies. This feature remains useful for non-authz computed fields (age calculations, aggregates, etc.).
 
 Walkable supports "pseudo-columns" - computed fields defined as SQL expressions that can be used in SELECT, WHERE, and ORDER BY clauses.
 
@@ -432,7 +551,7 @@ ORDER BY age DESC
 
 ---
 
-### 19. Enhanced Pagination with Validation
+### 20. Enhanced Pagination with Validation
 
 **Priority:** Low
 **Impact:** Safer pagination, better defaults
@@ -484,7 +603,7 @@ Walkable has a sophisticated pagination system with validation and fallbacks.
 
 ---
 
-### 20. Query-Time Filtering
+### 21. Query-Time Filtering
 
 **Priority:** Medium
 **Impact:** Dynamic WHERE clauses from client queries
