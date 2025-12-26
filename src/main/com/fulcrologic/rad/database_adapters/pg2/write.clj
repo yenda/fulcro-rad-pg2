@@ -334,7 +334,10 @@
 
 (defn- entity->table-row
   "Convert a namespaced entity map to table name and row data.
-   Returns {:table :table_name :row {:col1 val1 :col2 val2}}."
+   Returns {:table :table_name :row {:col1 val1 :col2 val2}}.
+
+   Handles ref attributes in ident format (e.g., {:account/address [:address/id uuid]})
+   by extracting the ID value."
   [key->attribute entity]
   (let [;; Find the id attribute (first key that is an identity)
         id-key (first (filter #(::attr/identity? (key->attribute %)) (keys entity)))
@@ -347,7 +350,15 @@
                (let [attr (key->attribute k)]
                  (if (and attr (= schema (::attr/schema attr)))
                    (let [col (keyword (sql.schema/column-name attr))
-                         sql-val (pg2/encode-for-sql (::attr/type attr) v)]
+                         attr-type (::attr/type attr)
+                         cardinality (::attr/cardinality attr)
+                         ;; Handle ref attributes - extract ID from ident format
+                         raw-val (if (and (= :ref attr-type)
+                                          (not= :many cardinality)
+                                          (eql/ident? v))
+                                   (second v)
+                                   v)
+                         sql-val (pg2/encode-for-sql attr-type raw-val)]
                      (assoc acc col sql-val))
                    acc)))
              {}

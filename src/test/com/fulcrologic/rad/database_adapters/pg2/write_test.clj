@@ -629,3 +629,66 @@
           result (write/delta->sql-plan insert-test-key->attribute :wrong-schema tempids delta)]
       (is (empty? (:inserts result)))
       (is (empty? (:updates result))))))
+
+;; =============================================================================
+;; entity->table-row Tests (used by save-entity!)
+;; =============================================================================
+
+(def entity-test-key->attribute
+  "Key->attribute map for testing entity->table-row with refs."
+  {:account/id {::attr/qualified-key :account/id
+                ::attr/type :uuid
+                ::attr/identity? true
+                ::attr/schema :production
+                ::rad.pg2/table "accounts"}
+   :account/name {::attr/qualified-key :account/name
+                  ::attr/type :string
+                  ::attr/schema :production
+                  ::attr/identities #{:account/id}}
+   :account/address {::attr/qualified-key :account/address
+                     ::attr/type :ref
+                     ::attr/cardinality :one
+                     ::attr/target :address/id
+                     ::attr/schema :production
+                     ::attr/identities #{:account/id}
+                     ::rad.pg2/column-name "address_id"}
+   :address/id {::attr/qualified-key :address/id
+                ::attr/type :uuid
+                ::attr/identity? true
+                ::attr/schema :production
+                ::rad.pg2/table "addresses"}})
+
+(deftest entity->table-row-handles-ref-with-ident-format
+  (testing "extracts ID from ident format ref value"
+    (let [account-id #uuid "11111111-1111-1111-1111-111111111111"
+          address-id #uuid "22222222-2222-2222-2222-222222222222"
+          entity {:account/id account-id
+                  :account/name "Test Account"
+                  :account/address [:address/id address-id]}
+          result (#'write/entity->table-row entity-test-key->attribute entity)]
+      (is (= :accounts (:table result)))
+      (is (= account-id (get-in result [:row :id])))
+      (is (= "Test Account" (get-in result [:row :name])))
+      ;; Key assertion: ref value should be extracted from ident
+      (is (= address-id (get-in result [:row :address_id])))))
+
+  (testing "handles direct UUID for ref (not ident format)"
+    (let [account-id #uuid "33333333-3333-3333-3333-333333333333"
+          address-id #uuid "44444444-4444-4444-4444-444444444444"
+          entity {:account/id account-id
+                  :account/name "Direct UUID"
+                  :account/address address-id}
+          result (#'write/entity->table-row entity-test-key->attribute entity)]
+      (is (= :accounts (:table result)))
+      ;; Direct UUID should pass through unchanged
+      (is (= address-id (get-in result [:row :address_id])))))
+
+  (testing "handles nil ref value"
+    (let [account-id #uuid "55555555-5555-5555-5555-555555555555"
+          entity {:account/id account-id
+                  :account/name "No Address"
+                  :account/address nil}
+          result (#'write/entity->table-row entity-test-key->attribute entity)]
+      (is (= :accounts (:table result)))
+      ;; nil should not be included (encode-for-sql returns nil for nil)
+      (is (nil? (get-in result [:row :address_id]))))))
