@@ -345,5 +345,5 @@
 (defn add-referential-column-statement
   "Generate ALTER TABLE statement to add a FK column."
   [origin-table origin-column target-type target-table target-column]
-  (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s REFERENCES %s(%s) DEFERRABLE INITIALLY DEFERRED;\n"
+  (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s REFERENCES %s(%s) DEFERRABLE INITIALLY DEFERRED"
           origin-table origin-column target-type target-table target-column))

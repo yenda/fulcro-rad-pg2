@@ -72,7 +72,8 @@
 
 (defmulti op->sql (fn [_k->attr _adapter {:keys [type]}] type))
 
-(defmethod op->sql :table [_ _adapter {:keys [table]}] (format "CREATE TABLE IF NOT EXISTS %s ();\n" table))
+(defmethod op->sql :table [_ _adapter {:keys [table]}]
+  [(format "CREATE TABLE IF NOT EXISTS %s ()" table)])
 
 (defmethod op->sql :ref [k->attr _ {:keys [table column attr]}]
   (let [{::attr/keys [cardinality target identities qualified-key]} attr
@@ -87,11 +88,10 @@
                      table (sql.schema/table-name k->attr target-attr)
                      column (sql.schema/column-name k->attr attr)
                      index-name (str column "_idx")]
-          (str
-           (pg2/add-referential-column-statement
+          [(pg2/add-referential-column-statement
             table column (sql-type reverse-target-attr) rev-target-table rev-target-column)
-           (format "CREATE INDEX IF NOT EXISTS %s ON %s(%s);\n"
-                   index-name table column))
+           (format "CREATE INDEX IF NOT EXISTS %s ON %s(%s)"
+                   index-name table column)]
           (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))
       (enc/if-let [origin-table (sql.schema/table-name k->attr attr)
                    origin-column (sql.schema/column-name attr)
@@ -99,11 +99,10 @@
                    target-column (sql.schema/column-name target-attr)
                    target-type (sql-type target-attr)
                    index-name (str column "_idx")]
-        (str
-         (pg2/add-referential-column-statement
+        [(pg2/add-referential-column-statement
           origin-table origin-column target-type target-table target-column)
-         (format "CREATE INDEX IF NOT EXISTS %s ON %s(%s);\n"
-                 index-name table column))
+         (format "CREATE INDEX IF NOT EXISTS %s ON %s(%s)"
+                 index-name table column)]
         (throw (ex-info "Cannot create to-many reference column." {:k qualified-key}))))))
 
 (defmethod op->sql :id [_k->attr _adapter {:keys [table column attr]}]
@@ -111,19 +110,19 @@
         index-name (str table "_" column "_idx")
         sequence-name (str table "_" column "_seq")
         typ (sql-type attr)]
-    (str
-     (if (#{:int :long} type)
-       (str
-        (format "CREATE SEQUENCE IF NOT EXISTS %s;\n" sequence-name)
-        (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s DEFAULT nextval('%s');\n"
-                table column typ sequence-name))
-       (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s;\n"
-               table column typ sequence-name))
-     (format "CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s(%s);\n"
-             index-name table column))))
+    (if (#{:int :long} type)
+      [(format "CREATE SEQUENCE IF NOT EXISTS %s" sequence-name)
+       (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s DEFAULT nextval('%s')"
+               table column typ sequence-name)
+       (format "CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s(%s)"
+               index-name table column)]
+      [(format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s"
+               table column typ)
+       (format "CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s(%s)"
+               index-name table column)])))
 
 (defmethod op->sql :column [_key->attr _adapter {:keys [table column attr]}]
-  (format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s;\n" table column (sql-type attr)))
+  [(format "ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s" table column (sql-type attr))])
 
 (defn attr->ops [schema-name key->attribute {::attr/keys [_qualified-key type identity? _identities]
                                              :keys [::attr/schema]
@@ -146,17 +145,19 @@
                    (str " (No mapping for type " type ")"))))))
 
 (>defn automatic-schema
-       "Returns SQL schema for all attributes that support it."
+       "Returns SQL schema for all attributes that support it.
+        Returns a flat vector of individual SQL statements (no semicolons)."
        [schema-name attributes]
        [keyword? ::attr/attributes => (s/coll-of string?)]
        (let [key->attribute (attr/attribute-map attributes)
              db-ops (mapcat (partial attr->ops schema-name key->attribute) attributes)
              {:keys [id table column ref]} (group-by :type db-ops)
              op (partial op->sql key->attribute nil)
-             new-tables (mapv op (set table))
-             new-ids (mapv op (set id))
-             new-columns (mapv op (set column))
-             new-refs (mapv op (set ref))]
+             ;; op->sql now returns vectors of statements, so we flatten
+             new-tables (mapcat op (set table))
+             new-ids (mapcat op (set id))
+             new-columns (mapcat op (set column))
+             new-refs (mapcat op (set ref))]
          (vec (concat new-tables new-ids new-columns new-refs))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -253,17 +254,19 @@
             (log/info "Applied migration:" name)))))))
 
 (defn- run-auto-schema!
-  "Auto-create schema from RAD attributes using pg2."
+  "Auto-create schema from RAD attributes using pg2.
+   Executes all statements in a single transaction for atomicity."
   [pool schema all-attributes]
   (let [stmts (automatic-schema schema all-attributes)]
     (log/info "Automatically trying to create SQL schema from attributes.")
     (pg.pool/with-conn [conn pool]
-      (doseq [s stmts]
-        (try
-          (pg/execute conn s)
-          (catch Exception e
-            (log/error e s)
-            (throw e)))))))
+      (pg/with-transaction [tx conn]
+        (doseq [s stmts]
+          (try
+            (pg/execute tx s)
+            (catch Exception e
+              (log/error e s)
+              (throw e))))))))
 
 (defn migrate!
   "Run migrations for all configured databases.

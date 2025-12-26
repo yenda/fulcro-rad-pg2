@@ -107,38 +107,38 @@
   (testing "generates CREATE TABLE statement"
     (let [op {:type :table :table "users"}
           result (mig/op->sql {} nil op)]
-      (is (= "CREATE TABLE IF NOT EXISTS users ();\n" result)))))
+      (is (= ["CREATE TABLE IF NOT EXISTS users ()"] result)))))
 
 (deftest op->sql-column-test
   (testing "generates ALTER TABLE ADD COLUMN for string type"
     (let [attr {::attr/qualified-key :user/name ::attr/type :string}
           op {:type :column :table "users" :column "name" :attr attr}
           result (mig/op->sql {} nil op)]
-      (is (= "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(200);\n" result))))
+      (is (= ["ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(200)"] result))))
 
   (testing "generates ALTER TABLE ADD COLUMN for int type"
     (let [attr {::attr/qualified-key :user/age ::attr/type :int}
           op {:type :column :table "users" :column "age" :attr attr}
           result (mig/op->sql {} nil op)]
-      (is (= "ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;\n" result))))
+      (is (= ["ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER"] result))))
 
   (testing "generates ALTER TABLE ADD COLUMN for boolean type"
     (let [attr {::attr/qualified-key :user/active ::attr/type :boolean}
           op {:type :column :table "users" :column "active" :attr attr}
           result (mig/op->sql {} nil op)]
-      (is (= "ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN;\n" result))))
+      (is (= ["ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN"] result))))
 
   (testing "generates ALTER TABLE ADD COLUMN for uuid type"
     (let [attr {::attr/qualified-key :user/token ::attr/type :uuid}
           op {:type :column :table "users" :column "token" :attr attr}
           result (mig/op->sql {} nil op)]
-      (is (= "ALTER TABLE users ADD COLUMN IF NOT EXISTS token UUID;\n" result))))
+      (is (= ["ALTER TABLE users ADD COLUMN IF NOT EXISTS token UUID"] result))))
 
   (testing "respects max-length for string types"
     (let [attr {::attr/qualified-key :user/bio ::attr/type :string ::rad.pg2/max-length 1000}
           op {:type :column :table "users" :column "bio" :attr attr}
           result (mig/op->sql {} nil op)]
-      (is (= "ALTER TABLE users ADD COLUMN IF NOT EXISTS bio VARCHAR(1000);\n" result)))))
+      (is (= ["ALTER TABLE users ADD COLUMN IF NOT EXISTS bio VARCHAR(1000)"] result)))))
 
 (deftest op->sql-id-uuid-test
   (testing "generates id column for UUID type"
@@ -246,3 +246,94 @@
       (is (= 2 (count result)))
       (is (= :table (:type (first result))))
       (is (= :id (:type (second result)))))))
+
+;; =============================================================================
+;; Single statement tests (regression for multiple statements bug)
+;; =============================================================================
+
+(defn- count-semicolons
+  "Count the number of semicolons in a SQL string.
+   PostgreSQL's prepared statement API only accepts one statement at a time,
+   so multiple semicolons indicate multiple statements that can't be executed together."
+  [sql-str]
+  (count (filter #(= \; %) sql-str)))
+
+(deftest op->sql-returns-single-statements
+  (testing "op->sql :table returns single statement (vector with one element)"
+    (let [op {:type :table :table "users"}
+          result (mig/op->sql {} nil op)]
+      ;; Should be a vector of single statements, not a concatenated string
+      (is (vector? result) "op->sql should return a vector of statements")
+      (is (every? #(zero? (count-semicolons %)) result)
+          "Each statement should not contain semicolons (added at execution time)")))
+
+  (testing "op->sql :id returns individual statements (not concatenated)"
+    (let [attr {::attr/qualified-key :user/id ::attr/type :uuid ::attr/identity? true
+                ::rad.pg2/table "users"}
+          op {:type :id :table "users" :column "id" :attr attr}
+          result (mig/op->sql {} nil op)]
+      ;; The bug: returns a single string with multiple statements
+      ;; The fix: should return a vector of individual statements
+      (is (vector? result)
+          "op->sql :id should return a vector of statements, not a concatenated string")
+      (when (vector? result)
+        (is (every? #(zero? (count-semicolons %)) result)
+            "Each statement should not contain semicolons"))))
+
+  (testing "op->sql :id with sequence returns individual statements"
+    (let [attr {::attr/qualified-key :item/id ::attr/type :long ::attr/identity? true
+                ::rad.pg2/table "items"}
+          op {:type :id :table "items" :column "id" :attr attr}
+          result (mig/op->sql {} nil op)]
+      (is (vector? result)
+          "op->sql :id (with sequence) should return a vector of statements")
+      (when (vector? result)
+        (is (= 3 (count result))
+            "Should have 3 statements: CREATE SEQUENCE, ALTER TABLE, CREATE INDEX")
+        (is (every? #(zero? (count-semicolons %)) result)
+            "Each statement should not contain semicolons"))))
+
+  (testing "op->sql :column returns single statement"
+    (let [attr {::attr/qualified-key :user/name ::attr/type :string}
+          op {:type :column :table "users" :column "name" :attr attr}
+          result (mig/op->sql {} nil op)]
+      (is (vector? result)
+          "op->sql :column should return a vector")
+      (when (vector? result)
+        (is (= 1 (count result))
+            "Should have 1 statement"))))
+
+  (testing "op->sql :ref returns individual statements"
+    (let [result (mig/op->sql key->attribute nil
+                              {:type :ref
+                               :table "line_items"
+                               :column "item_id"
+                               :attr attrs/line-item-item})]
+      (is (vector? result)
+          "op->sql :ref should return a vector of statements")
+      (when (vector? result)
+        (is (= 2 (count result))
+            "Should have 2 statements: ADD COLUMN and CREATE INDEX")
+        (is (every? #(zero? (count-semicolons %)) result)
+            "Each statement should not contain semicolons")))))
+
+(deftest automatic-schema-returns-single-statements
+  (testing "automatic-schema returns flat vector of individual SQL statements"
+    (let [result (mig/automatic-schema :production attrs/all-attributes)]
+      (is (vector? result))
+      ;; Each element should be a single SQL statement (no semicolons - added at execution)
+      (doseq [stmt result]
+        (is (string? stmt) "Each element should be a string")
+        (is (zero? (count-semicolons stmt))
+            (str "Statement should not contain semicolons: "
+                 (subs stmt 0 (min 80 (count stmt)))))))))
+
+;; =============================================================================
+;; Integration test: run-auto-schema! with pg2
+;; This test was added to catch the "multiple commands in prepared statement" bug
+;; where op->sql returned concatenated SQL strings instead of vectors.
+;;
+;; Note: This test is in queries_test.clj where pg2 is already imported
+;; and there's a proper test fixture. We keep this comment here for
+;; documentation of the bug and the unit tests above that verify the fix.
+;; =============================================================================

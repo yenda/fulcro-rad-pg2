@@ -23,6 +23,7 @@
    [com.wsscode.pathom3.connect.operation :as pco]
    [com.wsscode.pathom3.interface.eql :as p.eql]
    [next.jdbc :as jdbc]
+   [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.encore :as enc]
    [taoensso.timbre :as log])
@@ -3445,3 +3446,38 @@
                                          ["SELECT * FROM comments WHERE id = ?" comment-id])]
         (is (nil? db-result)
             "Comment should be deleted from database")))))
+
+;; =============================================================================
+;; Test: automatic-schema statements can be executed via pg2
+;;
+;; This test verifies the fix for the "multiple commands in prepared statement"
+;; bug where op->sql returned concatenated SQL strings instead of vectors.
+;; PostgreSQL's prepared statement API only accepts one statement at a time.
+;; =============================================================================
+
+(deftest automatic-schema-pg2-execution-test
+  (testing "automatic-schema returns statements that pg2 can execute individually"
+    ;; Create a fresh schema to test migration execution via pg2
+    (let [test-schema-name (str "test_pg2_migration_" (System/currentTimeMillis))
+          pool (:pool *test-env*)]
+      (try
+        ;; Use pg2 (not JDBC) to execute each statement - this is the code path that was failing
+        (pg.pool/with-conn [conn pool]
+          (pg/execute conn (str "CREATE SCHEMA " test-schema-name))
+          (pg/execute conn (str "SET search_path TO " test-schema-name))
+
+          ;; Get all migration statements
+          (let [stmts (mig/automatic-schema :tracker model/all-attributes)]
+            ;; Each statement should execute without "multiple commands" error
+            (doseq [stmt stmts]
+              (is (string? stmt)
+                  "Each statement should be a string")
+              ;; This will throw PGErrorResponse code 42601 if stmt contains multiple commands
+              (pg/execute conn stmt))))
+
+        (finally
+          ;; Cleanup
+          (pg.pool/with-conn [conn pool]
+            (try
+              (pg/execute conn (str "DROP SCHEMA " test-schema-name " CASCADE"))
+              (catch Exception _))))))))
