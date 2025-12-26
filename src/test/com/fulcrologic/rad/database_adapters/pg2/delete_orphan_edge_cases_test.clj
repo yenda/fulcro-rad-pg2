@@ -22,12 +22,10 @@
    [com.fulcrologic.rad.database-adapters.pg2.read :as read]
    [com.fulcrologic.rad.database-adapters.pg2.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.error :as p.error]
    [com.wsscode.pathom3.interface.eql :as p.eql]
-   [next.jdbc :as jdbc]
-   [next.jdbc.result-set :as rs]
+   [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
@@ -207,9 +205,6 @@
 ;; Test Infrastructure
 ;; =============================================================================
 
-(def jdbc-config
-  {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
-
 (def pg2-config
   {:host "localhost"
    :port 5432
@@ -217,33 +212,24 @@
    :password "password"
    :database "fulcro-rad-pg2"})
 
-(def jdbc-opts {:builder-fn rs/as-unqualified-lower-maps})
-
 (defn generate-test-schema-name []
   (str "test_cascade_" (System/currentTimeMillis) "_" (rand-int 10000)))
 
-(defn- split-sql-statements [sql]
-  (->> (str/split sql #";\n")
-       (map str/trim)
-       (remove empty?)))
-
 (defn with-test-db
-  "Run function with isolated test database, adds CASCADE constraints."
+  "Run function with isolated test database."
   [f]
-  (let [ds (jdbc/get-datasource jdbc-config)
-        schema-name (generate-test-schema-name)
-        jdbc-conn (jdbc/get-connection ds)
+  (let [schema-name (generate-test-schema-name)
         pg2-pool (pg.pool/pool (assoc pg2-config
                                       :pg-params {"search_path" schema-name}
                                       :pool-min-size 1
                                       :pool-max-size 2))]
     (try
-      ;; Create schema and tables
-      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
-      (doseq [stmt-block (mig/automatic-schema :production test-attributes)
-              stmt (split-sql-statements stmt-block)]
-        (jdbc/execute! jdbc-conn [stmt]))
+      ;; Create schema and tables using pg2
+      (pg.pool/with-conn [conn pg2-pool]
+        (pg/execute conn (str "CREATE SCHEMA " schema-name))
+        (pg/execute conn (str "SET search_path TO " schema-name))
+        (doseq [stmt (mig/automatic-schema :production test-attributes)]
+          (pg/execute conn stmt)))
 
       ;; Create env
       (let [resolvers (read/generate-resolvers test-attributes :production)
@@ -251,53 +237,52 @@
                     (assoc ::attr/key->attribute key->attribute
                            ::rad.pg2/connection-pools {:production pg2-pool}
                            ::p.error/lenient-mode? true))]
-        (f jdbc-conn env))
+        (f pg2-pool env))
 
       (finally
-        (pg.pool/close pg2-pool)
-        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close jdbc-conn)))))
+        (pg.pool/with-conn [conn pg2-pool]
+          (pg/execute conn (str "DROP SCHEMA " schema-name " CASCADE")))
+        (pg.pool/close pg2-pool)))))
 
 (defn with-cascade-db
   "Run function with isolated test database with SQL CASCADE constraints."
   [f]
-  (let [ds (jdbc/get-datasource jdbc-config)
-        schema-name (generate-test-schema-name)
-        jdbc-conn (jdbc/get-connection ds)
+  (let [schema-name (generate-test-schema-name)
         pg2-pool (pg.pool/pool (assoc pg2-config
                                       :pg-params {"search_path" schema-name}
                                       :pool-min-size 1
                                       :pool-max-size 2))]
     (try
-      ;; Create schema and tables
-      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
+      ;; Create schema and tables using pg2
+      (pg.pool/with-conn [conn pg2-pool]
+        (pg/execute conn (str "CREATE SCHEMA " schema-name))
+        (pg/execute conn (str "SET search_path TO " schema-name))
 
-      ;; Create tables with CASCADE constraints
-      (jdbc/execute! jdbc-conn ["CREATE TABLE organizations (
-                                   id UUID PRIMARY KEY,
-                                   name VARCHAR(255)
-                                 )"])
-      (jdbc/execute! jdbc-conn ["CREATE TABLE projects (
-                                   id UUID PRIMARY KEY,
-                                   name VARCHAR(255),
-                                   org_id UUID REFERENCES organizations(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-                                 )"])
-      (jdbc/execute! jdbc-conn ["CREATE TABLE tasks (
-                                   id UUID PRIMARY KEY,
-                                   name VARCHAR(255),
-                                   project_id UUID REFERENCES projects(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-                                 )"])
-      (jdbc/execute! jdbc-conn ["CREATE TABLE subtasks (
-                                   id UUID PRIMARY KEY,
-                                   name VARCHAR(255),
-                                   task_id UUID REFERENCES tasks(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-                                 )"])
-      (jdbc/execute! jdbc-conn ["CREATE TABLE nodes (
-                                   id UUID PRIMARY KEY,
-                                   name VARCHAR(255),
-                                   parent_id UUID REFERENCES nodes(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-                                 )"])
+        ;; Create tables with CASCADE constraints
+        (pg/execute conn "CREATE TABLE organizations (
+                           id UUID PRIMARY KEY,
+                           name VARCHAR(255)
+                         )")
+        (pg/execute conn "CREATE TABLE projects (
+                           id UUID PRIMARY KEY,
+                           name VARCHAR(255),
+                           org_id UUID REFERENCES organizations(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                         )")
+        (pg/execute conn "CREATE TABLE tasks (
+                           id UUID PRIMARY KEY,
+                           name VARCHAR(255),
+                           project_id UUID REFERENCES projects(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                         )")
+        (pg/execute conn "CREATE TABLE subtasks (
+                           id UUID PRIMARY KEY,
+                           name VARCHAR(255),
+                           task_id UUID REFERENCES tasks(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                         )")
+        (pg/execute conn "CREATE TABLE nodes (
+                           id UUID PRIMARY KEY,
+                           name VARCHAR(255),
+                           parent_id UUID REFERENCES nodes(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                         )"))
 
       ;; Create env
       (let [resolvers (read/generate-resolvers test-attributes :production)
@@ -305,12 +290,12 @@
                     (assoc ::attr/key->attribute key->attribute
                            ::rad.pg2/connection-pools {:production pg2-pool}
                            ::p.error/lenient-mode? true))]
-        (f jdbc-conn env))
+        (f pg2-pool env))
 
       (finally
-        (pg.pool/close pg2-pool)
-        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close jdbc-conn)))))
+        (pg.pool/with-conn [conn pg2-pool]
+          (pg/execute conn (str "DROP SCHEMA " schema-name " CASCADE")))
+        (pg.pool/close pg2-pool)))))
 
 (defn pathom-query [env query]
   (p.eql/process env query))
@@ -318,8 +303,9 @@
 (defn save! [env delta]
   (write/save-form! env {::rad.form/delta delta}))
 
-(defn count-rows [conn table]
-  (:count (first (jdbc/execute! conn [(str "SELECT COUNT(*) as count FROM " table)] jdbc-opts))))
+(defn count-rows [pool table]
+  (pg.pool/with-conn [conn pool]
+    (:count (first (pg/execute conn (str "SELECT COUNT(*) as count FROM " table))))))
 
 ;; =============================================================================
 ;; Edge Case Tests: Orphan Has Own Dependents (Application-level Cascade)
@@ -328,7 +314,7 @@
 (deftest ^:integration orphan-delete-does-not-cascade-to-dependents
   (testing "delete-orphan? only deletes the immediate orphan, not its children (no implicit cascade)"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create full hierarchy
         ;; Org -> Project -> Task -> Subtask
         (let [org-tempid (tempid/tempid)
@@ -356,10 +342,10 @@
               subtask-id (get (:tempids result) subtask-tempid)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "organizations")))
-          (is (= 1 (count-rows conn "projects")))
-          (is (= 1 (count-rows conn "tasks")))
-          (is (= 1 (count-rows conn "subtasks")))
+          (is (= 1 (count-rows pool "organizations")))
+          (is (= 1 (count-rows pool "projects")))
+          (is (= 1 (count-rows pool "tasks")))
+          (is (= 1 (count-rows pool "subtasks")))
 
           ;; Remove project from org (should trigger delete-orphan? on project)
           ;; Note: Task and Subtask should become orphaned but NOT deleted
@@ -371,10 +357,10 @@
               (save! env remove-delta)
 
               ;; Project should be deleted (delete-orphan? on org/projects)
-              (is (= 0 (count-rows conn "projects")) "Project should be deleted")
+              (is (= 0 (count-rows pool "projects")) "Project should be deleted")
 
               ;; Org still exists
-              (is (= 1 (count-rows conn "organizations")) "Org should still exist")
+              (is (= 1 (count-rows pool "organizations")) "Org should still exist")
 
               ;; Tasks and Subtasks are now orphaned in the database
               ;; Without SQL CASCADE, they remain as orphans
@@ -398,7 +384,7 @@
 (deftest ^:integration sql-cascade-cleans-up-nested-dependents
   (testing "SQL CASCADE handles nested cleanup when delete-orphan? deletes a parent"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create full hierarchy with SQL CASCADE constraints
         (let [org-tempid (tempid/tempid)
               proj-tempid (tempid/tempid)
@@ -423,10 +409,10 @@
               proj-id (get (:tempids result) proj-tempid)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "organizations")))
-          (is (= 1 (count-rows conn "projects")))
-          (is (= 1 (count-rows conn "tasks")))
-          (is (= 1 (count-rows conn "subtasks")))
+          (is (= 1 (count-rows pool "organizations")))
+          (is (= 1 (count-rows pool "projects")))
+          (is (= 1 (count-rows pool "tasks")))
+          (is (= 1 (count-rows pool "subtasks")))
 
           ;; Remove project from org
           ;; delete-orphan? deletes the project
@@ -437,15 +423,15 @@
             (save! env remove-delta)
 
             ;; All should be cleaned up: delete-orphan? + SQL CASCADE
-            (is (= 1 (count-rows conn "organizations")) "Org should still exist")
-            (is (= 0 (count-rows conn "projects")) "Project should be deleted by delete-orphan?")
-            (is (= 0 (count-rows conn "tasks")) "Task should be deleted by SQL CASCADE")
-            (is (= 0 (count-rows conn "subtasks")) "Subtask should be deleted by SQL CASCADE")))))))
+            (is (= 1 (count-rows pool "organizations")) "Org should still exist")
+            (is (= 0 (count-rows pool "projects")) "Project should be deleted by delete-orphan?")
+            (is (= 0 (count-rows pool "tasks")) "Task should be deleted by SQL CASCADE")
+            (is (= 0 (count-rows pool "subtasks")) "Subtask should be deleted by SQL CASCADE")))))))
 
 (deftest ^:integration sql-cascade-vs-delete-orphan-direct-delete
   (testing "Direct delete of parent triggers SQL CASCADE but not delete-orphan?"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create hierarchy
         (let [org-tempid (tempid/tempid)
               proj-tempid (tempid/tempid)
@@ -464,9 +450,9 @@
               org-id (get (:tempids result) org-tempid)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "organizations")))
-          (is (= 1 (count-rows conn "projects")))
-          (is (= 1 (count-rows conn "tasks")))
+          (is (= 1 (count-rows pool "organizations")))
+          (is (= 1 (count-rows pool "projects")))
+          (is (= 1 (count-rows pool "tasks")))
 
           ;; Directly DELETE the organization (not via delete-orphan?)
           (let [delete-delta {[:org/id org-id]
@@ -474,9 +460,9 @@
             (save! env delete-delta)
 
             ;; SQL CASCADE should clean up everything
-            (is (= 0 (count-rows conn "organizations")) "Org should be deleted")
-            (is (= 0 (count-rows conn "projects")) "Project should be deleted by CASCADE")
-            (is (= 0 (count-rows conn "tasks")) "Task should be deleted by CASCADE")))))))
+            (is (= 0 (count-rows pool "organizations")) "Org should be deleted")
+            (is (= 0 (count-rows pool "projects")) "Project should be deleted by CASCADE")
+            (is (= 0 (count-rows pool "tasks")) "Task should be deleted by CASCADE")))))))
 
 ;; =============================================================================
 ;; Edge Case Tests: Self-Referential delete-orphan?
@@ -485,7 +471,7 @@
 (deftest ^:integration self-ref-delete-orphan-removes-children
   (testing "Removing children from parent in self-ref deletes them"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create parent with children
         (let [parent-tempid (tempid/tempid)
               child1-tempid (tempid/tempid)
@@ -506,7 +492,7 @@
               child2-id (get (:tempids result) child2-tempid)]
 
           ;; Verify initial state
-          (is (= 3 (count-rows conn "nodes")))
+          (is (= 3 (count-rows pool "nodes")))
 
           ;; Remove one child
           (let [remove-delta {[:node/id parent-id]
@@ -516,7 +502,7 @@
             (save! env remove-delta)
 
             ;; Child 1 should be deleted
-            (is (= 2 (count-rows conn "nodes")) "One child should be deleted")
+            (is (= 2 (count-rows pool "nodes")) "One child should be deleted")
 
             ;; Verify which nodes remain
             (let [query-result (pathom-query env
@@ -531,7 +517,7 @@
 (deftest ^:integration self-ref-deep-hierarchy-delete
   (testing "delete-orphan? on self-referential deep hierarchy"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create 4-level hierarchy
         ;; Root -> Level1 -> Level2 -> Level3
         (let [root-tempid (tempid/tempid)
@@ -557,7 +543,7 @@
               l1-id (get (:tempids result) l1-tempid)]
 
           ;; Verify initial state
-          (is (= 4 (count-rows conn "nodes")))
+          (is (= 4 (count-rows pool "nodes")))
 
           ;; Remove Level 1 from Root
           ;; delete-orphan? deletes Level 1
@@ -568,7 +554,7 @@
             (save! env remove-delta)
 
             ;; Only root should remain
-            (is (= 1 (count-rows conn "nodes")) "Only root should remain")
+            (is (= 1 (count-rows pool "nodes")) "Only root should remain")
 
             (let [query-result (pathom-query env
                                              [{[:node/id root-id]
@@ -584,7 +570,7 @@
 (deftest ^:integration large-collection-delete-orphan-performance
   (testing "delete-orphan? handles large collections efficiently"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create org with many projects (100)
         (let [org-tempid (tempid/tempid)
               n-projects 100
@@ -605,8 +591,8 @@
               proj-ids (mapv #(get (:tempids result) %) project-tempids)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "organizations")))
-          (is (= n-projects (count-rows conn "projects")))
+          (is (= 1 (count-rows pool "organizations")))
+          (is (= n-projects (count-rows pool "projects")))
 
           ;; Remove all projects at once
           (let [start-time (System/currentTimeMillis)
@@ -618,7 +604,7 @@
                 duration-ms (- end-time start-time)]
 
             ;; All projects should be deleted
-            (is (= 0 (count-rows conn "projects")) "All projects should be deleted")
+            (is (= 0 (count-rows pool "projects")) "All projects should be deleted")
 
             ;; Performance check: should complete in reasonable time
             ;; (This is more of a regression detector than a hard requirement)
@@ -627,7 +613,7 @@
 (deftest ^:integration large-collection-partial-delete
   (testing "delete-orphan? correctly handles removing subset of large collection"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Create org with 50 projects
         (let [org-tempid (tempid/tempid)
               n-projects 50
@@ -651,7 +637,7 @@
               remove-ids (drop 25 proj-ids)]
 
           ;; Verify initial state
-          (is (= n-projects (count-rows conn "projects")))
+          (is (= n-projects (count-rows pool "projects")))
 
           ;; Remove half the projects
           (let [remove-delta {[:org/id org-id]
@@ -660,7 +646,7 @@
             (save! env remove-delta)
 
             ;; Half should be deleted
-            (is (= 25 (count-rows conn "projects")) "25 projects should remain")
+            (is (= 25 (count-rows pool "projects")) "25 projects should remain")
 
             ;; Query to verify the right ones remain
             (let [query-result (pathom-query env
@@ -678,7 +664,7 @@
 (deftest ^:integration mixed-add-remove-with-delete-orphan
   (testing "Simultaneous add and remove with delete-orphan?"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Org with 3 projects
         (let [org-tempid (tempid/tempid)
               proj1-tempid (tempid/tempid)
@@ -705,7 +691,7 @@
               proj3-id (get (:tempids result) proj3-tempid)]
 
           ;; Verify initial state
-          (is (= 3 (count-rows conn "projects")))
+          (is (= 3 (count-rows pool "projects")))
 
           ;; Mixed operation: Remove proj1, proj2; Add new proj4
           ;; Keep proj3
@@ -723,7 +709,7 @@
                 proj4-id (get (:tempids mixed-result) proj4-tempid)]
 
             ;; Should have 2 projects: proj3 (kept) and proj4 (new)
-            (is (= 2 (count-rows conn "projects")))
+            (is (= 2 (count-rows pool "projects")))
 
             ;; Verify correct projects remain
             (let [query-result (pathom-query env
@@ -742,7 +728,7 @@
 (deftest ^:integration reparenting-child-between-parents
   (testing "Moving child from one parent to another with delete-orphan?"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Two orgs, one project
         (let [org1-tempid (tempid/tempid)
               org2-tempid (tempid/tempid)
@@ -761,8 +747,8 @@
               proj-id (get (:tempids result) proj-tempid)]
 
           ;; Verify initial state
-          (is (= 2 (count-rows conn "organizations")))
-          (is (= 1 (count-rows conn "projects")))
+          (is (= 2 (count-rows pool "organizations")))
+          (is (= 1 (count-rows pool "projects")))
 
           ;; Move project from org1 to org2
           ;; This should:
@@ -784,7 +770,7 @@
             ;; because delete-orphan? triggers on removal from org1
             ;; before the add to org2 is processed
             ;; In practice, re-parenting should be done by updating the FK directly
-            (let [project-count (count-rows conn "projects")]
+            (let [project-count (count-rows pool "projects")]
               ;; Due to delete-orphan? semantics, the project may be deleted
               ;; This test documents the current behavior
               (is (or (= 0 project-count) (= 1 project-count))
@@ -793,7 +779,7 @@
 (deftest ^:integration reparenting-via-fk-update-preserves-entity
   (testing "Re-parenting by updating FK directly preserves the entity"
     (with-cascade-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: Two orgs, one project
         (let [org1-tempid (tempid/tempid)
               org2-tempid (tempid/tempid)
@@ -812,7 +798,7 @@
               proj-id (get (:tempids result) proj-tempid)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "projects")))
+          (is (= 1 (count-rows pool "projects")))
 
           ;; Re-parent by updating project's FK directly (not via parent's collection)
           ;; This bypasses delete-orphan? logic
@@ -822,7 +808,7 @@
             (save! env move-delta)
 
             ;; Project should still exist
-            (is (= 1 (count-rows conn "projects")) "Project should be preserved")
+            (is (= 1 (count-rows pool "projects")) "Project should be preserved")
 
             ;; Verify project is now under org2
             (let [query-result (pathom-query env

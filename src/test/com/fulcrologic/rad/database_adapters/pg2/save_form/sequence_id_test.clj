@@ -9,7 +9,6 @@
    1. Unit tests for pure functions (no DB needed)
    2. Integration tests with pg2 pools (require PostgreSQL)"
   (:require
-   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
@@ -118,13 +117,6 @@
 (defn generate-test-schema-name []
   (str "test_seq_id_" (System/currentTimeMillis) "_" (rand-int 10000)))
 
-(defn- split-sql-statements
-  "Split a multi-statement SQL string into individual statements."
-  [sql]
-  (->> (str/split sql #";\n")
-       (map str/trim)
-       (remove empty?)))
-
 (defn setup-test-schema
   "Create isolated test schema and tables. Returns schema name."
   [pool]
@@ -132,9 +124,8 @@
     (pool/with-conn [conn pool]
       (pg/execute conn (str "CREATE SCHEMA " schema-name))
       (pg/execute conn (str "SET search_path TO " schema-name))
-      ;; Create tables - split multi-statement strings
-      (doseq [stmt-block (mig/automatic-schema :production attrs/all-attributes)
-              stmt (split-sql-statements stmt-block)]
+      ;; Create tables - automatic-schema now returns individual statements
+      (doseq [stmt (mig/automatic-schema :production attrs/all-attributes)]
         (pg/execute conn stmt)))
     schema-name))
 

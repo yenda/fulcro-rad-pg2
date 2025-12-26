@@ -8,7 +8,6 @@
    - delete-orphan? behavior
    - Verifying state via queries after mutations"
   (:require
-   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
@@ -18,21 +17,16 @@
    [com.fulcrologic.rad.database-adapters.pg2.write :as write]
    [com.fulcrologic.rad.database-adapters.test-helpers.attributes :as attrs]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.error :as p.error]
    [com.wsscode.pathom3.interface.eql :as p.eql]
-   [next.jdbc :as jdbc]
-   [next.jdbc.result-set :as rs]
+   [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
 ;; =============================================================================
 ;; Test Configuration
 ;; =============================================================================
-
-(def jdbc-config
-  {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
 
 (def pg2-config
   {:host "localhost"
@@ -42,7 +36,6 @@
    :database "fulcro-rad-pg2"})
 
 (def key->attribute (enc/keys-by ::attr/qualified-key attrs/all-attributes))
-(def jdbc-opts {:builder-fn rs/as-unqualified-lower-maps})
 
 ;; =============================================================================
 ;; Test Infrastructure
@@ -51,28 +44,21 @@
 (defn generate-test-schema-name []
   (str "test_lifecycle_" (System/currentTimeMillis) "_" (rand-int 10000)))
 
-(defn- split-sql-statements [sql]
-  (->> (str/split sql #";\n")
-       (map str/trim)
-       (remove empty?)))
-
 (defn with-test-db
   "Run function with isolated test database, both write and read capabilities."
   [f]
-  (let [ds (jdbc/get-datasource jdbc-config)
-        schema-name (generate-test-schema-name)
-        jdbc-conn (jdbc/get-connection ds)
+  (let [schema-name (generate-test-schema-name)
         pg2-pool (pg.pool/pool (assoc pg2-config
                                       :pg-params {"search_path" schema-name}
                                       :pool-min-size 1
                                       :pool-max-size 2))]
     (try
-      ;; Create schema and tables
-      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
-      (doseq [stmt-block (mig/automatic-schema :production attrs/all-attributes)
-              stmt (split-sql-statements stmt-block)]
-        (jdbc/execute! jdbc-conn [stmt]))
+      ;; Create schema and tables using pg2
+      (pg.pool/with-conn [conn pg2-pool]
+        (pg/execute conn (str "CREATE SCHEMA " schema-name))
+        (pg/execute conn (str "SET search_path TO " schema-name))
+        (doseq [stmt (mig/automatic-schema :production attrs/all-attributes)]
+          (pg/execute conn stmt)))
 
       ;; Create combined env for both reads and writes
       (let [resolvers (read/generate-resolvers attrs/all-attributes :production)
@@ -80,12 +66,12 @@
                     (assoc ::attr/key->attribute key->attribute
                            ::rad.pg2/connection-pools {:production pg2-pool}
                            ::p.error/lenient-mode? true))]
-        (f jdbc-conn env))
+        (f pg2-pool env))
 
       (finally
-        (pg.pool/close pg2-pool)
-        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close jdbc-conn)))))
+        (pg.pool/with-conn [conn pg2-pool]
+          (pg/execute conn (str "DROP SCHEMA " schema-name " CASCADE")))
+        (pg.pool/close pg2-pool)))))
 
 (defn pathom-query [env query]
   (p.eql/process env query))
@@ -97,8 +83,9 @@
 ;; Helper: Count entities
 ;; =============================================================================
 
-(defn count-rows [conn table]
-  (:count (first (jdbc/execute! conn [(str "SELECT COUNT(*) as count FROM " table)] jdbc-opts))))
+(defn count-rows [pool table]
+  (pg.pool/with-conn [conn pool]
+    (:count (first (pg/execute conn (str "SELECT COUNT(*) as count FROM " table))))))
 
 ;; =============================================================================
 ;; Document/Metadata Lifecycle Tests
@@ -110,7 +97,7 @@
 (deftest ^:integration create-document-with-metadata-and-query
   (testing "Create document with metadata, verify via Pathom query"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         (let [doc-tempid (tempid/tempid)
               meta-tempid (tempid/tempid)
               delta {[:document/id doc-tempid]
@@ -137,7 +124,7 @@
 (deftest ^:integration change-metadata-deletes-old-verified-by-query
   (testing "Changing document's metadata deletes old, verified via Pathom"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: create document with metadata
         (let [doc-tempid (tempid/tempid)
               old-meta-tempid (tempid/tempid)
@@ -152,7 +139,7 @@
               old-meta-id (get (:tempids setup-result) old-meta-tempid)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "metadata")))
+          (is (= 1 (count-rows pool "metadata")))
 
           ;; Create new metadata and change reference
           (let [new-meta-tempid (tempid/tempid)
@@ -166,7 +153,7 @@
                 new-meta-id (get (:tempids change-result) new-meta-tempid)]
 
             ;; Old metadata should be deleted (delete-orphan? true)
-            (is (= 1 (count-rows conn "metadata")) "Should still have 1 metadata (old deleted, new created)")
+            (is (= 1 (count-rows pool "metadata")) "Should still have 1 metadata (old deleted, new created)")
 
             ;; Query to verify new metadata is linked
             (let [query-result (pathom-query env
@@ -187,7 +174,7 @@
 (deftest ^:integration remove-metadata-deletes-orphan-verified-by-query
   (testing "Removing document's metadata deletes the orphan, verified via Pathom"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: create document with metadata
         (let [doc-tempid (tempid/tempid)
               meta-tempid (tempid/tempid)
@@ -202,8 +189,8 @@
               meta-id (get (:tempids setup-result) meta-tempid)]
 
           ;; Verify initial state
-          (is (= 1 (count-rows conn "metadata")))
-          (is (= 1 (count-rows conn "documents")))
+          (is (= 1 (count-rows pool "metadata")))
+          (is (= 1 (count-rows pool "documents")))
 
           ;; Remove reference
           (let [remove-delta {[:document/id doc-id]
@@ -212,8 +199,8 @@
             (save! env remove-delta)
 
             ;; Metadata should be deleted
-            (is (= 0 (count-rows conn "metadata")) "Orphaned metadata should be deleted")
-            (is (= 1 (count-rows conn "documents")) "Document should still exist")
+            (is (= 0 (count-rows pool "metadata")) "Orphaned metadata should be deleted")
+            (is (= 1 (count-rows pool "documents")) "Document should still exist")
 
             ;; Query document - should have no metadata
             (let [query-result (pathom-query env
@@ -238,7 +225,7 @@
 (deftest ^:integration to-many-add-and-remove-with-query
   (testing "Add and remove from to-many collection, verify via Pathom"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Setup: create account with two addresses
         (let [acct-tempid (tempid/tempid)
               addr1-tempid (tempid/tempid)
@@ -257,7 +244,7 @@
               addr2-id (get (:tempids setup-result) addr2-tempid)]
 
           ;; Verify initial state
-          (is (= 2 (count-rows conn "addresses")))
+          (is (= 2 (count-rows pool "addresses")))
 
           ;; Query account with addresses
           (let [query-result (pathom-query env
@@ -280,7 +267,7 @@
             (save! env remove-delta)
 
             ;; Both addresses should still exist (no delete-orphan?)
-            (is (= 2 (count-rows conn "addresses")) "Addresses should still exist (no delete-orphan?)")
+            (is (= 2 (count-rows pool "addresses")) "Addresses should still exist (no delete-orphan?)")
 
             ;; But account should only show one address
             (let [query-result (pathom-query env
@@ -299,7 +286,7 @@
 (deftest ^:integration create-child-then-link-to-parent
   (testing "Create metadata first, then link it to a document"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         ;; Create orphan metadata first
         (let [meta-tempid (tempid/tempid)
               meta-delta {[:metadata/id meta-tempid]
@@ -338,7 +325,7 @@
 (deftest ^:integration multiple-documents-same-session
   (testing "Create multiple documents with metadata in same session"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [doc1-tempid (tempid/tempid)
               meta1-tempid (tempid/tempid)
               doc2-tempid (tempid/tempid)
@@ -357,8 +344,8 @@
               doc1-id (get (:tempids result) doc1-tempid)
               doc2-id (get (:tempids result) doc2-tempid)]
 
-          (is (= 2 (count-rows conn "documents")))
-          (is (= 2 (count-rows conn "metadata")))
+          (is (= 2 (count-rows pool "documents")))
+          (is (= 2 (count-rows pool "metadata")))
 
           ;; Query both documents
           (let [query-result (pathom-query env
@@ -385,7 +372,7 @@
 (deftest ^:integration self-ref-create-parent-child-hierarchy
   (testing "Create parent and children via save!, query both directions"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Create parent and two children in one operation
         (let [parent-tempid (tempid/tempid)
               child1-tempid (tempid/tempid)
@@ -403,7 +390,7 @@
               child1-id (get (:tempids result) child1-tempid)
               child2-id (get (:tempids result) child2-tempid)]
 
-          (is (= 3 (count-rows conn "categories")))
+          (is (= 3 (count-rows pool "categories")))
 
           ;; Query child -> parent (forward direction, FK on child)
           (let [query-result (pathom-query env
@@ -430,7 +417,7 @@
 (deftest ^:integration self-ref-change-parent
   (testing "Change a child's parent, verify both old and new parent's children lists"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Create two parents and one child
         (let [parent1-tempid (tempid/tempid)
               parent2-tempid (tempid/tempid)
@@ -447,7 +434,7 @@
               parent2-id (get (:tempids setup-result) parent2-tempid)
               child-id (get (:tempids setup-result) child-tempid)]
 
-          (is (= 3 (count-rows conn "categories")))
+          (is (= 3 (count-rows pool "categories")))
 
           ;; Verify initial state - child belongs to parent1
           (let [query-result (pathom-query env
@@ -489,7 +476,7 @@
 (deftest ^:integration self-ref-remove-parent-orphans-child
   (testing "Remove parent reference, child becomes orphan (no delete-orphan? on parent attr)"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Create parent and child
         (let [parent-tempid (tempid/tempid)
               child-tempid (tempid/tempid)
@@ -502,7 +489,7 @@
               parent-id (get (:tempids setup-result) parent-tempid)
               child-id (get (:tempids setup-result) child-tempid)]
 
-          (is (= 2 (count-rows conn "categories")))
+          (is (= 2 (count-rows pool "categories")))
 
           ;; Remove parent reference from child (set to nil)
           (let [remove-delta {[:category/id child-id]
@@ -511,7 +498,7 @@
             (save! env remove-delta)
 
             ;; Both categories should still exist (no delete-orphan? on category/parent)
-            (is (= 2 (count-rows conn "categories")) "Both categories should still exist")
+            (is (= 2 (count-rows pool "categories")) "Both categories should still exist")
 
             ;; Child should have no parent
             (let [query-result (pathom-query env
@@ -532,7 +519,7 @@
 (deftest ^:integration self-ref-nested-hierarchy
   (testing "Create and query 3-level hierarchy: grandparent -> parent -> child"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [gp-tempid (tempid/tempid)
               p-tempid (tempid/tempid)
               c-tempid (tempid/tempid)
@@ -549,7 +536,7 @@
               p-id (get (:tempids result) p-tempid)
               c-id (get (:tempids result) c-tempid)]
 
-          (is (= 3 (count-rows conn "categories")))
+          (is (= 3 (count-rows pool "categories")))
 
           ;; Query from child up through all ancestors
           (let [query-result (pathom-query env

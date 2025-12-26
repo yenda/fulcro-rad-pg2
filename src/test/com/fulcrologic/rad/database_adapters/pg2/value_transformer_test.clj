@@ -18,12 +18,10 @@
    [com.fulcrologic.rad.database-adapters.pg2.read :as read]
    [com.fulcrologic.rad.database-adapters.pg2.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.error :as p.error]
    [com.wsscode.pathom3.interface.eql :as p.eql]
-   [next.jdbc :as jdbc]
-   [next.jdbc.result-set :as rs]
+   [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.encore :as enc])
   (:import
@@ -292,9 +290,6 @@
 ;; Integration Tests: Round-trip Persistence
 ;; =============================================================================
 
-(def jdbc-config
-  {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
-
 (def pg2-config
   {:host "localhost"
    :port 5432
@@ -302,33 +297,24 @@
    :password "password"
    :database "fulcro-rad-pg2"})
 
-(def jdbc-opts {:builder-fn rs/as-unqualified-lower-maps})
-
 (defn generate-test-schema-name []
   (str "test_transformers_" (System/currentTimeMillis) "_" (rand-int 10000)))
-
-(defn- split-sql-statements [sql]
-  (->> (str/split sql #";\n")
-       (map str/trim)
-       (remove empty?)))
 
 (defn with-test-db
   "Run function with isolated test database."
   [f]
-  (let [ds (jdbc/get-datasource jdbc-config)
-        schema-name (generate-test-schema-name)
-        jdbc-conn (jdbc/get-connection ds)
+  (let [schema-name (generate-test-schema-name)
         pg2-pool (pg.pool/pool (assoc pg2-config
                                       :pg-params {"search_path" schema-name}
                                       :pool-min-size 1
                                       :pool-max-size 2))]
     (try
-      ;; Create schema and tables
-      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
-      (doseq [stmt-block (mig/automatic-schema :production test-attributes)
-              stmt (split-sql-statements stmt-block)]
-        (jdbc/execute! jdbc-conn [stmt]))
+      ;; Create schema and tables using pg2
+      (pg.pool/with-conn [conn pg2-pool]
+        (pg/execute conn (str "CREATE SCHEMA " schema-name))
+        (pg/execute conn (str "SET search_path TO " schema-name))
+        (doseq [stmt (mig/automatic-schema :production test-attributes)]
+          (pg/execute conn stmt)))
 
       ;; Create combined env
       (let [resolvers (read/generate-resolvers test-attributes :production)
@@ -336,12 +322,12 @@
                     (assoc ::attr/key->attribute key->attribute
                            ::rad.pg2/connection-pools {:production pg2-pool}
                            ::p.error/lenient-mode? true))]
-        (f jdbc-conn env))
+        (f pg2-pool env))
 
       (finally
-        (pg.pool/close pg2-pool)
-        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close jdbc-conn)))))
+        (pg.pool/with-conn [conn pg2-pool]
+          (pg/execute conn (str "DROP SCHEMA " schema-name " CASCADE")))
+        (pg.pool/close pg2-pool)))))
 
 (defn pathom-query [env query]
   (p.eql/process env query))
@@ -349,20 +335,21 @@
 (defn save! [env delta]
   (write/save-form! env {::rad.form/delta delta}))
 
-(defn get-raw-entity [conn id]
-  (first (jdbc/execute! conn ["SELECT * FROM entities WHERE id = ?" id] jdbc-opts)))
+(defn get-raw-entity [pool id]
+  (pg.pool/with-conn [conn pool]
+    (first (pg/execute conn "SELECT * FROM entities WHERE id = $1" {:params [id]}))))
 
 (deftest ^:integration custom-write-transformer-encryption
   (testing "Custom write transformer encrypts value in database"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               delta {[:entity/id tempid]
                      {:entity/name {:after "Test Entity"}
                       :entity/secret {:after "my-secret-value"}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           ;; Verify raw DB value is encrypted
           (is (some? raw) "Entity should exist")
@@ -373,14 +360,14 @@
 (deftest ^:integration custom-write-transformer-tags
   (testing "Custom write transformer serializes tags to comma-separated string"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               delta {[:entity/id tempid]
                      {:entity/name {:after "Tagged Entity"}
                       :entity/tags {:after [:red :green :blue]}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           ;; Verify raw DB value is comma-separated
           (is (= "red,green,blue" (:tags raw)) "Tags should be comma-separated in DB"))))))
@@ -388,7 +375,7 @@
 (deftest ^:integration custom-write-transformer-json-metadata
   (testing "Custom write transformer encodes map as JSON-like string"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               metadata {:author "John" :version 42 :nested {:a 1}}
               delta {[:entity/id tempid]
@@ -396,7 +383,7 @@
                       :entity/metadata {:after metadata}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           ;; Verify raw DB value is encoded
           (is (string? (:metadata raw)) "Metadata should be string in DB")
@@ -406,7 +393,7 @@
 (deftest ^:integration custom-transformer-handles-nil-on-write
   (testing "Custom write transformer handles nil values correctly"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               delta {[:entity/id tempid]
                      {:entity/name {:after "Nil Test"}
@@ -414,7 +401,7 @@
                       :entity/tags {:after nil}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           (is (nil? (:secret raw)) "Nil secret should stay nil")
           (is (nil? (:tags raw)) "Nil tags should stay nil"))))))
@@ -422,7 +409,7 @@
 (deftest ^:integration custom-transformer-update-value
   (testing "Custom write transformer is applied on update as well"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         ;; Create entity
         (let [tempid (tempid/tempid)
               delta {[:entity/id tempid]
@@ -432,7 +419,7 @@
               real-id (get (:tempids result) tempid)]
 
           ;; Verify original value
-          (let [raw (get-raw-entity conn real-id)]
+          (let [raw (get-raw-entity pool real-id)]
             (is (= "original" (decrypt-value (:secret raw)))))
 
           ;; Update the secret
@@ -442,28 +429,28 @@
             (save! env update-delta))
 
           ;; Verify updated value is encrypted
-          (let [raw (get-raw-entity conn real-id)]
+          (let [raw (get-raw-entity pool real-id)]
             (is (str/starts-with? (:secret raw) "ENC:"))
             (is (= "updated-secret" (decrypt-value (:secret raw))))))))))
 
 (deftest ^:integration optional-transformer-uppercases
   (testing "Optional field transformer uppercases non-nil values"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               delta {[:entity/id tempid]
                      {:entity/name {:after "Optional Test"}
                       :entity/optional {:after "lowercase"}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           (is (= "LOWERCASE" (:optional raw)) "Value should be uppercased"))))))
 
 (deftest ^:integration transformer-special-characters
   (testing "Transformers handle special characters correctly"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               special-string "Secret with 'quotes', \"doubles\", and\nnewlines!"
               delta {[:entity/id tempid]
@@ -471,7 +458,7 @@
                       :entity/secret {:after special-string}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           (is (= special-string (decrypt-value (:secret raw)))
               "Special characters should survive encryption round-trip"))))))
@@ -479,7 +466,7 @@
 (deftest ^:integration transformer-unicode
   (testing "Transformers handle unicode correctly"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               unicode-string "Unicöde: 日本語, 한국어, 🎉"
               delta {[:entity/id tempid]
@@ -487,7 +474,7 @@
                       :entity/secret {:after unicode-string}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           (is (= unicode-string (decrypt-value (:secret raw)))
               "Unicode should survive encryption round-trip"))))))
@@ -495,14 +482,14 @@
 (deftest ^:integration transformer-empty-string
   (testing "Transformers handle empty strings correctly"
     (with-test-db
-      (fn [conn env]
+      (fn [pool env]
         (let [tempid (tempid/tempid)
               delta {[:entity/id tempid]
                      {:entity/name {:after "Empty String Test"}
                       :entity/secret {:after ""}}}
               result (save! env delta)
               real-id (get (:tempids result) tempid)
-              raw (get-raw-entity conn real-id)]
+              raw (get-raw-entity pool real-id)]
 
           ;; Our encrypt-value returns "ENC:<empty-base64>" for empty string
           (is (str/starts-with? (:secret raw) "ENC:"))

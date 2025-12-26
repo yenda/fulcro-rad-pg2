@@ -13,12 +13,10 @@
    [com.fulcrologic.rad.database-adapters.pg2.read :as read]
    [com.fulcrologic.rad.database-adapters.pg2.write :as write]
    [com.fulcrologic.rad.form :as rad.form]
-   [com.fulcrologic.rad.ids :as ids]
    [com.wsscode.pathom3.connect.indexes :as pci]
    [com.wsscode.pathom3.error :as p.error]
    [com.wsscode.pathom3.interface.eql :as p.eql]
-   [next.jdbc :as jdbc]
-   [next.jdbc.result-set :as rs]
+   [pg.core :as pg]
    [pg.pool :as pg.pool]
    [taoensso.encore :as enc]))
 
@@ -184,9 +182,6 @@
 ;; Integration Tests: Ordering Behavior
 ;; =============================================================================
 
-(def jdbc-config
-  {:jdbcUrl "jdbc:postgresql://localhost:5432/fulcro-rad-pg2?user=user&password=password"})
-
 (def pg2-config
   {:host "localhost"
    :port 5432
@@ -194,33 +189,24 @@
    :password "password"
    :database "fulcro-rad-pg2"})
 
-(def jdbc-opts {:builder-fn rs/as-unqualified-lower-maps})
-
 (defn generate-test-schema-name []
   (str "test_order_by_" (System/currentTimeMillis) "_" (rand-int 10000)))
-
-(defn- split-sql-statements [sql]
-  (->> (str/split sql #";\n")
-       (map str/trim)
-       (remove empty?)))
 
 (defn with-test-db
   "Run function with isolated test database."
   [f]
-  (let [ds (jdbc/get-datasource jdbc-config)
-        schema-name (generate-test-schema-name)
-        jdbc-conn (jdbc/get-connection ds)
+  (let [schema-name (generate-test-schema-name)
         pg2-pool (pg.pool/pool (assoc pg2-config
                                       :pg-params {"search_path" schema-name}
                                       :pool-min-size 1
                                       :pool-max-size 2))]
     (try
-      ;; Create schema and tables
-      (jdbc/execute! jdbc-conn [(str "CREATE SCHEMA " schema-name)])
-      (jdbc/execute! jdbc-conn [(str "SET search_path TO " schema-name)])
-      (doseq [stmt-block (mig/automatic-schema :production test-attributes)
-              stmt (split-sql-statements stmt-block)]
-        (jdbc/execute! jdbc-conn [stmt]))
+      ;; Create schema and tables using pg2
+      (pg.pool/with-conn [conn pg2-pool]
+        (pg/execute conn (str "CREATE SCHEMA " schema-name))
+        (pg/execute conn (str "SET search_path TO " schema-name))
+        (doseq [stmt (mig/automatic-schema :production test-attributes)]
+          (pg/execute conn stmt)))
 
       ;; Create combined env for both reads and writes
       (let [resolvers (read/generate-resolvers test-attributes :production)
@@ -228,12 +214,12 @@
                     (assoc ::attr/key->attribute key->attribute
                            ::rad.pg2/connection-pools {:production pg2-pool}
                            ::p.error/lenient-mode? true))]
-        (f jdbc-conn env))
+        (f pg2-pool env))
 
       (finally
-        (pg.pool/close pg2-pool)
-        (jdbc/execute! jdbc-conn [(str "DROP SCHEMA " schema-name " CASCADE")])
-        (.close jdbc-conn)))))
+        (pg.pool/with-conn [conn pg2-pool]
+          (pg/execute conn (str "DROP SCHEMA " schema-name " CASCADE")))
+        (pg.pool/close pg2-pool)))))
 
 (defn pathom-query [env query]
   (p.eql/process env query))
@@ -244,7 +230,7 @@
 (deftest ^:integration order-by-returns-ordered-results
   (testing "Children are returned in order when order-by is specified"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         ;; Create parent with 5 children having various positions
         (let [parent-tempid (tempid/tempid)
               child1-tempid (tempid/tempid)
@@ -293,7 +279,7 @@
 (deftest ^:integration order-by-alphabetical-ordering
   (testing "Children are returned in alphabetical order when order-by is :child/name"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         (let [parent-tempid (tempid/tempid)
               child1-tempid (tempid/tempid)
               child2-tempid (tempid/tempid)
@@ -330,7 +316,7 @@
 (deftest ^:integration order-by-vs-unordered-comparison
   (testing "Ordered and unordered queries return same data but potentially different order"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         (let [parent-tempid (tempid/tempid)
               ;; Create children with positions 3, 1, 2 (insertion order != position order)
               children-tempids (mapv (fn [_] (tempid/tempid)) (range 3))
@@ -359,7 +345,7 @@
 (deftest ^:integration order-by-empty-collection
   (testing "Order-by works correctly with empty collection"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         ;; Create parent with no children
         (let [parent-tempid (tempid/tempid)
               delta {[:parent/id parent-tempid]
@@ -379,7 +365,7 @@
 (deftest ^:integration order-by-single-child
   (testing "Order-by works correctly with single child"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         (let [parent-tempid (tempid/tempid)
               child-tempid (tempid/tempid)
               delta {[:parent/id parent-tempid]
@@ -402,7 +388,7 @@
 (deftest ^:integration order-by-null-values
   (testing "Order-by handles null values in ordering column"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         (let [parent-tempid (tempid/tempid)
               child1-tempid (tempid/tempid)
               child2-tempid (tempid/tempid)
@@ -439,7 +425,7 @@
 (deftest ^:integration order-by-duplicate-values
   (testing "Order-by handles duplicate values in ordering column"
     (with-test-db
-      (fn [_conn env]
+      (fn [_pool env]
         (let [parent-tempid (tempid/tempid)
               child1-tempid (tempid/tempid)
               child2-tempid (tempid/tempid)

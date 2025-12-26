@@ -7,6 +7,7 @@
    - save-form! orchestrates: plan → allocate IDs → generate SQL → execute"
   (:require
    [clojure.set :as set]
+   [clojure.string :as str]
    [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
    [com.fulcrologic.rad.attributes :as attr]
    [com.fulcrologic.rad.database-adapters.pg2 :as rad.pg2]
@@ -327,6 +328,60 @@
   [_ e]
   (and (instance? PGErrorResponse e)
        (= ::serialization-failure (error-condition e))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Simple Entity Insert (for seeding)
+
+(defn- entity->table-row
+  "Convert a namespaced entity map to table name and row data.
+   Returns {:table :table_name :row {:col1 val1 :col2 val2}}."
+  [key->attribute entity]
+  (let [;; Find the id attribute (first key that is an identity)
+        id-key (first (filter #(::attr/identity? (key->attribute %)) (keys entity)))
+        id-attr (when id-key (key->attribute id-key))
+        table (when id-attr (keyword (sql.schema/table-name key->attribute id-attr)))
+        ;; Build row from all attributes that belong to this table's schema
+        schema (::attr/schema id-attr)
+        row (reduce-kv
+             (fn [acc k v]
+               (let [attr (key->attribute k)]
+                 (if (and attr (= schema (::attr/schema attr)))
+                   (let [col (keyword (sql.schema/column-name attr))
+                         sql-val (pg2/encode-for-sql (::attr/type attr) v)]
+                     (assoc acc col sql-val))
+                   acc)))
+             {}
+             entity)]
+    {:table table :row row}))
+
+(defn save-entity!
+  "Save a single entity to the database (insert, ignores conflicts).
+   Useful for seeding data where entities may already exist.
+
+   env - Map with :connection and :key->attribute
+   entity - Entity map with namespaced keys matching RAD attributes
+
+   Example:
+   ```clojure
+   (pg/with-connection [conn pool]
+     (save-entity! {:connection conn
+                    :key->attribute key->attr}
+                   {:user/id #uuid \"...\"
+                    :user/name \"Alice\"}))
+   ```"
+  [{:keys [connection key->attribute]} entity]
+  (let [{:keys [table row]} (entity->table-row key->attribute entity)]
+    (when (and table (seq row))
+      (let [;; Find ID column for ON CONFLICT
+            id-col (first (filter #(str/ends-with? (name %) "_id") (keys row)))
+            query (cond-> {:insert-into table
+                           :values [row]}
+                    id-col
+                    (assoc :on-conflict [id-col]
+                           :do-nothing true))
+            [sql & params] (pgh/format query)]
+        (log/debug "save-entity!" {:table table :sql sql})
+        (pg/execute connection sql {:params (vec params)})))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Main API
