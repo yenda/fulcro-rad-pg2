@@ -3269,3 +3269,179 @@
       (doseq [stmt (filter #(str/starts-with? % "CREATE SEQUENCE") stmts)]
         (is (str/includes? stmt "IF NOT EXISTS")
             (str "CREATE SEQUENCE should use IF NOT EXISTS: " stmt))))))
+
+;; =============================================================================
+;; END-TO-END MIGRATION TEST
+;;
+;; Explicit test demonstrating: empty DB + complex model → working schema
+;; =============================================================================
+
+(deftest end-to-end-migration-creates-complete-schema-test
+  (testing "automatic-schema creates complete working schema from complex model"
+    (let [schema (:schema *test-env*)
+          jdbc-conn (:jdbc-conn *test-env*)]
+      ;; Verify all 19 expected tables were created
+      (let [tables (jdbc/execute!
+                    jdbc-conn
+                    ["SELECT table_name FROM information_schema.tables
+                      WHERE table_schema = ? AND table_type = 'BASE TABLE'
+                      ORDER BY table_name"
+                     schema])
+            table-names (set (map :tables/table_name tables))]
+        (is (= 19 (count table-names))
+            "Should create all 19 entity tables")
+        ;; Verify each expected table exists
+        (doseq [expected ["organizations" "teams" "team_members" "users"
+                          "api_tokens" "notifications" "projects" "project_members"
+                          "webhooks" "labels" "milestones" "issues" "issue_labels"
+                          "issue_watchers" "issue_assignees" "comments" "reactions"
+                          "attachments" "time_entries"]]
+          (is (contains? table-names expected)
+              (str "Table " expected " should exist"))))
+
+      ;; Verify complex table has all expected columns (issues = 24 columns)
+      (let [columns (jdbc/execute!
+                     jdbc-conn
+                     ["SELECT column_name FROM information_schema.columns
+                       WHERE table_schema = ? AND table_name = 'issues'"
+                      schema])]
+        (is (>= (count columns) 20)
+            "Issues table should have 20+ columns for all attributes"))
+
+      ;; Verify FK constraints were created
+      (let [fks (jdbc/execute-one!
+                 jdbc-conn
+                 ["SELECT COUNT(*) as cnt FROM information_schema.table_constraints
+                   WHERE table_schema = ? AND constraint_type = 'FOREIGN KEY'"
+                  schema])]
+        (is (>= (:cnt fks) 25)
+            "Should have 25+ foreign key constraints"))
+
+      ;; Verify indexes were created on FK columns
+      (let [indexes (jdbc/execute-one!
+                     jdbc-conn
+                     ["SELECT COUNT(*) as cnt FROM pg_indexes
+                       WHERE schemaname = ?"
+                      schema])]
+        (is (>= (:cnt indexes) 30)
+            "Should have 30+ indexes (identity + FK columns)")))))
+
+(deftest end-to-end-migration-enables-full-crud-test
+  (testing "Schema created by automatic-schema supports full CRUD operations"
+    ;; This test proves that after migration, the entire data model works:
+    ;; - Create entities at multiple levels of the hierarchy
+    ;; - Query with 5-level deep joins
+    ;; - Update entities
+    ;; - Delete with FK constraint enforcement
+
+    ;; CREATE: Build a complete hierarchy (Org → Project → Issue → Comment → Reaction)
+    (let [user-tid (tempid/tempid)
+          org-tid (tempid/tempid)
+          project-tid (tempid/tempid)
+          issue-tid (tempid/tempid)
+          comment-tid (tempid/tempid)
+          reaction-tid (tempid/tempid)
+
+          ;; Create user first (needed for reporter)
+          user-result (save! {[:user/id user-tid]
+                              {:user/email {:after "e2e@test.com"}
+                               :user/username {:after "e2etest"}
+                               :user/active? {:after true}}})
+          user-id (get-in user-result [:tempids user-tid])
+
+          ;; Create organization
+          org-result (save! {[:organization/id org-tid]
+                             {:organization/name {:after "E2E Test Org"}}})
+          org-id (get-in org-result [:tempids org-tid])
+
+          ;; Create project under organization
+          project-result (save! {[:project/id project-tid]
+                                 {:project/name {:after "E2E Project"}
+                                  :project/organization {:after [:organization/id org-id]}}})
+          project-id (get-in project-result [:tempids project-tid])
+
+          ;; Create issue under project
+          issue-result (save! {[:issue/id issue-tid]
+                               {:issue/title {:after "E2E Issue"}
+                                :issue/status {:after :issue.status/open}
+                                :issue/type {:after :issue.type/bug}
+                                :issue/project {:after [:project/id project-id]}
+                                :issue/reporter {:after [:user/id user-id]}
+                                :issue/created-at {:after (now)}}})
+          issue-id (get-in issue-result [:tempids issue-tid])
+
+          ;; Create comment under issue
+          comment-result (save! {[:comment/id comment-tid]
+                                 {:comment/body {:after "E2E Comment"}
+                                  :comment/issue {:after [:issue/id issue-id]}
+                                  :comment/author {:after [:user/id user-id]}
+                                  :comment/created-at {:after (now)}}})
+          comment-id (get-in comment-result [:tempids comment-tid])
+
+          ;; Create reaction under comment
+          reaction-result (save! {[:reaction/id reaction-tid]
+                                  {:reaction/type {:after :reaction.type/thumbs-up}
+                                   :reaction/comment {:after [:comment/id comment-id]}
+                                   :reaction/user {:after [:user/id user-id]}
+                                   :reaction/created-at {:after (now)}}})
+          reaction-id (get-in reaction-result [:tempids reaction-tid])]
+
+      ;; READ: Query 5 levels deep (Org → Project → Issue → Comment → Reaction)
+      (let [result (run-query [{[:organization/id org-id]
+                                [:organization/name
+                                 {:organization/projects
+                                  [:project/name
+                                   {:project/issues
+                                    [:issue/title
+                                     {:issue/comments
+                                      [:comment/body
+                                       {:comment/reactions
+                                        [:reaction/type]}]}]}]}]}])]
+        (is (= "E2E Test Org" (get-in result [[:organization/id org-id] :organization/name]))
+            "Should read organization")
+        (is (= "E2E Project" (get-in result [[:organization/id org-id]
+                                             :organization/projects 0 :project/name]))
+            "Should read project via join")
+        (is (= "E2E Issue" (get-in result [[:organization/id org-id]
+                                           :organization/projects 0
+                                           :project/issues 0 :issue/title]))
+            "Should read issue via 2-level join")
+        (is (= "E2E Comment" (get-in result [[:organization/id org-id]
+                                             :organization/projects 0
+                                             :project/issues 0
+                                             :issue/comments 0 :comment/body]))
+            "Should read comment via 3-level join")
+        (is (= :reaction.type/thumbs-up
+               (get-in result [[:organization/id org-id]
+                               :organization/projects 0
+                               :project/issues 0
+                               :issue/comments 0
+                               :comment/reactions 0 :reaction/type]))
+            "Should read reaction via 5-level deep join"))
+
+      ;; UPDATE: Modify the issue
+      (save! {[:issue/id issue-id]
+              {:issue/title {:before "E2E Issue" :after "Updated E2E Issue"}
+               :issue/status {:before :issue.status/open :after :issue.status/in-progress}}})
+
+      (let [result (run-query [{[:issue/id issue-id]
+                                [:issue/title :issue/status]}])]
+        (is (= "Updated E2E Issue" (get-in result [[:issue/id issue-id] :issue/title]))
+            "Issue title should be updated")
+        (is (= :issue.status/in-progress (get-in result [[:issue/id issue-id] :issue/status]))
+            "Issue status should be updated"))
+
+      ;; DELETE: Verify FK constraint prevents invalid deletes
+      (is (thrown? Exception
+                   (save! {[:comment/id comment-id] {:delete true}}))
+          "Should not allow deleting comment with reactions (FK constraint)")
+
+      ;; DELETE: Valid cascade - delete reaction first, then comment
+      (save! {[:reaction/id reaction-id] {:delete true}})
+      (save! {[:comment/id comment-id] {:delete true}})
+
+      ;; Verify comment is gone via direct DB query
+      (let [db-result (jdbc/execute-one! (:jdbc-conn *test-env*)
+                                         ["SELECT * FROM comments WHERE id = ?" comment-id])]
+        (is (nil? db-result)
+            "Comment should be deleted from database")))))
