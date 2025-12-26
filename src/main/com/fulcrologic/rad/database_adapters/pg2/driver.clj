@@ -173,9 +173,12 @@
          (if (contains? raw-row col)
            (let [v (get raw-row col)
                  decoded (if (and v decoder) (decoder v) v)]
-             (if simple?
-               (assoc acc output-key decoded)
-               (assoc-in acc output-path decoded)))
+             ;; Skip nil values - don't include them in output
+             (if (some? decoded)
+               (if simple?
+                 (assoc acc output-key decoded)
+                 (assoc-in acc output-path decoded))
+               acc))
            acc))
        {}
        entries))))

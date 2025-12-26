@@ -305,11 +305,11 @@
   (testing "generates correct ALTER TABLE statement"
     (let [result (pg2/add-referential-column-statement
                   "accounts" "address_id" "UUID" "addresses" "id")]
-      (is (= "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS address_id UUID REFERENCES addresses(id) DEFERRABLE INITIALLY DEFERRED;\n"
+      (is (= "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS address_id UUID REFERENCES addresses(id) DEFERRABLE INITIALLY DEFERRED"
              result))))
 
   (testing "handles different types"
     (let [result (pg2/add-referential-column-statement
                   "orders" "customer_id" "BIGINT" "customers" "id")]
-      (is (= "ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id BIGINT REFERENCES customers(id) DEFERRABLE INITIALLY DEFERRED;\n"
+      (is (= "ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id BIGINT REFERENCES customers(id) DEFERRABLE INITIALLY DEFERRED"
              result)))))
