@@ -691,4 +691,77 @@
           result (#'write/entity->table-row entity-test-key->attribute entity)]
       (is (= :accounts (:table result)))
       ;; nil should not be included (encode-for-sql returns nil for nil)
-      (is (nil? (get-in result [:row :address_id]))))))
+      (is (nil? (get-in result [:row :address_id])))))
+
+  (testing "handles map format ref value (e.g., {:address/id uuid})"
+    (let [account-id #uuid "66666666-6666-6666-6666-666666666666"
+          address-id #uuid "77777777-7777-7777-7777-777777777777"
+          entity {:account/id account-id
+                  :account/name "Map Format"
+                  :account/address {:address/id address-id}}
+          result (#'write/entity->table-row entity-test-key->attribute entity)]
+      (is (= :accounts (:table result)))
+      ;; Map format should extract the ID value
+      (is (= address-id (get-in result [:row :address_id])))))
+
+  (testing "returns id-col for ON CONFLICT"
+    (let [account-id #uuid "88888888-8888-8888-8888-888888888888"
+          entity {:account/id account-id
+                  :account/name "With ID Col"}
+          result (#'write/entity->table-row entity-test-key->attribute entity)]
+      (is (= :id (:id-col result))))))
+
+;; Regression test for bug where save-entity! picked wrong ON CONFLICT column
+;; when table had multiple *_id columns (e.g., owner_id, forked_from_id)
+(def sidekick-key->attribute
+  "Key->attribute map simulating sidekicks table with multiple *_id columns."
+  {:sidekick/id {::attr/qualified-key :sidekick/id
+                 ::attr/type :uuid
+                 ::attr/identity? true
+                 ::attr/schema :production
+                 ::rad.pg2/table "sidekicks"}
+   :sidekick/name {::attr/qualified-key :sidekick/name
+                   ::attr/type :string
+                   ::attr/schema :production
+                   ::attr/identities #{:sidekick/id}}
+   :sidekick/owner {::attr/qualified-key :sidekick/owner
+                    ::attr/type :ref
+                    ::attr/cardinality :one
+                    ::attr/target :user/id
+                    ::attr/schema :production
+                    ::attr/identities #{:sidekick/id}
+                    ::rad.pg2/column-name "owner_id"}
+   :sidekick/forked-from {::attr/qualified-key :sidekick/forked-from
+                          ::attr/type :ref
+                          ::attr/cardinality :one
+                          ::attr/target :sidekick/id
+                          ::attr/schema :production
+                          ::attr/identities #{:sidekick/id}
+                          ::rad.pg2/column-name "forked_from_id"}
+   :user/id {::attr/qualified-key :user/id
+             ::attr/type :uuid
+             ::attr/identity? true
+             ::attr/schema :production
+             ::rad.pg2/table "users"}})
+
+(deftest entity->table-row-uses-identity-column-not-first-id-column
+  (testing "id-col is identity column, not first *_id column alphabetically"
+    ;; This tests the bug where (first (filter #(str/ends-with? "_id") ...))
+    ;; would pick owner_id or forked_from_id instead of id
+    (let [sidekick-id #uuid "99999999-9999-9999-9999-999999999999"
+          owner-id #uuid "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+          entity {:sidekick/id sidekick-id
+                  :sidekick/name "Test Sidekick"
+                  :sidekick/owner owner-id}
+          result (#'write/entity->table-row sidekick-key->attribute entity)]
+      ;; The identity column should be :id, not :owner_id or :forked_from_id
+      (is (= :id (:id-col result))
+          "id-col should be the identity column :id, not a ref column like :owner_id")))
+
+  (testing "entity with nil owner still uses correct id-col"
+    (let [sidekick-id #uuid "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+          entity {:sidekick/id sidekick-id
+                  :sidekick/name "System Sidekick"
+                  :sidekick/owner nil}
+          result (#'write/entity->table-row sidekick-key->attribute entity)]
+      (is (= :id (:id-col result))))))

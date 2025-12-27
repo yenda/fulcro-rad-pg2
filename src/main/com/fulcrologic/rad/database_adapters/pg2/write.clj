@@ -332,17 +332,32 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Simple Entity Insert (for seeding)
 
+(defn- extract-ref-id
+  "Extract the ID value from a ref attribute value.
+   Handles three formats:
+   - Ident: [:target/id uuid] -> uuid
+   - Map: {:target/id uuid} -> uuid
+   - Direct value: uuid -> uuid"
+  [v]
+  (cond
+    (eql/ident? v) (second v)
+    (and (map? v) (= 1 (count v))) (first (vals v))
+    :else v))
+
 (defn- entity->table-row
   "Convert a namespaced entity map to table name and row data.
-   Returns {:table :table_name :row {:col1 val1 :col2 val2}}.
+   Returns {:table :table_name :row {:col1 val1 :col2 val2} :id-col :id}.
 
-   Handles ref attributes in ident format (e.g., {:account/address [:address/id uuid]})
-   by extracting the ID value."
+   Handles ref attributes in multiple formats:
+   - Ident: {:account/address [:address/id uuid]}
+   - Map: {:account/address {:address/id uuid}}
+   - Direct: {:account/address uuid}"
   [key->attribute entity]
   (let [;; Find the id attribute (first key that is an identity)
         id-key (first (filter #(::attr/identity? (key->attribute %)) (keys entity)))
         id-attr (when id-key (key->attribute id-key))
         table (when id-attr (keyword (sql.schema/table-name key->attribute id-attr)))
+        id-col (when id-attr (keyword (sql.schema/column-name id-attr)))
         ;; Build row from all attributes that belong to this table's schema
         schema (::attr/schema id-attr)
         row (reduce-kv
@@ -352,18 +367,17 @@
                    (let [col (keyword (sql.schema/column-name attr))
                          attr-type (::attr/type attr)
                          cardinality (::attr/cardinality attr)
-                         ;; Handle ref attributes - extract ID from ident format
+                         ;; Handle ref attributes - extract ID from various formats
                          raw-val (if (and (= :ref attr-type)
-                                          (not= :many cardinality)
-                                          (eql/ident? v))
-                                   (second v)
+                                          (not= :many cardinality))
+                                   (extract-ref-id v)
                                    v)
                          sql-val (pg2/encode-for-sql attr-type raw-val)]
                      (assoc acc col sql-val))
                    acc)))
              {}
              entity)]
-    {:table table :row row}))
+    {:table table :row row :id-col id-col}))
 
 (defn save-entity!
   "Save a single entity to the database (insert, ignores conflicts).
@@ -381,11 +395,9 @@
                     :user/name \"Alice\"}))
    ```"
   [{:keys [connection key->attribute]} entity]
-  (let [{:keys [table row]} (entity->table-row key->attribute entity)]
+  (let [{:keys [table row id-col]} (entity->table-row key->attribute entity)]
     (when (and table (seq row))
-      (let [;; Find ID column for ON CONFLICT
-            id-col (first (filter #(str/ends-with? (name %) "_id") (keys row)))
-            query (cond-> {:insert-into table
+      (let [query (cond-> {:insert-into table
                            :values [row]}
                     id-col
                     (assoc :on-conflict [id-col]
